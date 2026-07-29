@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Build NVIDIA-580xx legacy sysext — proprietary kernel modules.
+# Targets Maxwell / Pascal / Volta GPUs (GTX 9xx/10xx, Titan V).
+# All build logic lives in mkosi.shared/nvidia-build.sh (shared with
+# the nvidia sibling sub-image); this wrapper just selects the
+# branch and sources it. The build script in turn sources the
+# generic kmod helpers from mkosi.shared/kmod-build.sh.
+
+set -euo pipefail
+
+STAGE="${1:-final}"
+[ "$STAGE" = "final" ] || exit 0
+
+export NVIDIA_BRANCH=580xx
+export NVIDIA_BUILD_OPTIONAL=1
+source "${SRCDIR}/mkosi.shared/nvidia-build.sh"

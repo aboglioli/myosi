@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+. "${SRCDIR}/mkosi.shared/sysext-build.sh"
+[ "${1:-final}" = "final" ] || exit 0
+
+# Incus (from COPR ganto/lxc4) is DEFERRED for v1 build proving — same
+# dnf5 copr enable plumbing issue as desktop. See desktop/mkosi.postinst
+# for the failure pattern and follow-up notes.
+
+# Unit activation is declarative: static `.wants/` symlinks shipped
+# under mkosi.profiles/virt/mkosi.extra/usr/lib/systemd/system/
+# {sockets,multi-user}.target.wants/. Same artifact covers both
+# delivery modes — profile baked into main AND sysext-merged at runtime.
+# The 18 modular libvirt sockets (virtqemud{,-ro,-admin}.socket plus
+# the same triplet for virtstoraged/virtnetworkd/virtnodedevd/
+# virtinterfaced/virtnwfilterd) plus virtqemud.service for autostart
+# all live as symlinks in profile content — no imperative
+# sysext_uphold_*/systemctl/preset replay needed.
+#
+# Excluded by NOT shipping a symlink: libvirtd* (monolithic daemon
+# fights modular drivers), virtxend*/virtlxcd*/virtvboxd* (drivers we
+# don't ship and whose RPMs aren't in the package set anyway).
+
+# libvirt's SELinux types (virt_log_t, virtqemud_var_run_t,
+# virt_qemu_ga_exec_t, ...) ship in Fedora's `selinux-policy-targeted`
+# package, which is part of the base image — same arrangement as
+# container-selinux / flatpak-selinux / incus-selinux / passt-selinux
+# / swtpm-selinux (all listed in mkosi.conf.d/10-packages-base.conf).
+# Verified on .11: /etc/selinux/targeted/contexts/files/file_contexts
+# has virt fcontext rules in the active policy without any sysext
+# being merged, which means the virt module is already compiled into
+# the monolithic targeted policy.
+#
+# Combined with the build-time baked xattrs (mkfs.erofs --file-contexts=
+# in sysext_finalize → security.selinux xattrs on every sysext file
+# from policy at build time), no runtime `semodule -i virt.pp.bz2` is
+# needed. The previous Upholds=sysext-load-selinux@virt.service
+# referenced a unit that does not exist anywhere in the codebase —
+# would have logged "Unit not found" at every virt sysext merge.
+
+sysext_write_extension_release virt
+
+sysext_finalize "$@"

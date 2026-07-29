@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Build OpenZFS sysext — kmod (CDDL-licensed, taints kernel as
+# proprietary on load, but signature is honored) + userspace (zfs,
+# zpool, zed). All build logic lives in mkosi.shared/zfs-build.sh;
+# this wrapper just sources it.
+#
+# OpenZFS upstream tracks new kernel releases on its own schedule
+# (usually weeks-to-months behind a major kernel bump). When the
+# in-tree akmod-zfs source from RPMFusion doesn't compile against
+# the current kernel headers, set ZFS_BUILD_OPTIONAL=1 in the build
+# environment to make rpmbuild failures non-fatal — the postinst
+# logs a warning and exits 0 with no kmod installed. CI then ships
+# everything else and the prior zfs sysext keeps working on
+# deployed hosts until upstream catches up.
+
+set -euo pipefail
+
+STAGE="${1:-final}"
+[ "$STAGE" = "final" ] || exit 0
+
+source "${SRCDIR}/mkosi.shared/zfs-build.sh"

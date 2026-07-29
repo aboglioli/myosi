@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+. "${SRCDIR}/mkosi.shared/sysext-build.sh"
+[ "${1:-final}" = "final" ] || exit 0
+
+# COPR-provided packages (niri, ghostty, xwayland-satellite) ship via
+# `Repositories=copr:USER/PROJECT` lines in mkosi.conf.d/
+# 10-packages.conf — mkosi v26 resolves those into the right
+# /etc/yum.repos.d/ drop-ins before the dnf install pass, no chrooted
+# `dnf copr enable` needed. monaspace-fonts still skipped because the
+# upstream COPR has no fc44 build; fetch the GitHub zip post-install
+# if you want monaspace specifically.
+
+# Swap Fedora's `ffmpeg-free` for RPMFusion's full `ffmpeg`. Done in
+# a postinst step (not via mkosi `Repositories=rpmfusion-free`
+# + `Packages=ffmpeg`) because dnf's normal install path won't
+# replace ffmpeg-free with ffmpeg automatically — they Provide() the
+# same virtual capability and the resolver picks one. --allowerasing
+# explicitly authorises dnf to remove the conflicting ffmpeg-free
+# (and its libavcodec-free / libswresample-free siblings).
+#
+# Same pattern myos/profiles/desktop.sh uses; gives access to the
+# real H.264 / H.265 / AAC / AC3 codecs missing from Fedora's
+# stripped libavcodec-free.
+#
+# rpmfusion-free-release is removed after install so the sealed
+# sysext doesn't ship a /etc/yum.repos.d/rpmfusion-free.repo
+# pointing at a repo the deployed host won't reach anyway (sysupdate
+# replaces the whole sysext, no in-place dnf upgrades).
+# RPMFusion-free is available to dnf via
+# mkosi.sandbox/etc/yum.repos.d/rpmfusion-free-fedora-44.repo for the
+# ffmpeg swap below. libva-intel-media-driver (the Intel VAAPI driver
+# Fedora now ships natively in updates) is pulled in the main
+# Packages= pass, no RPMFusion dep for it any more.
+#
+# ffmpeg still has to live here because the resolver won't
+# auto-replace ffmpeg-free (which the base pulls in as a dep) with
+# RPMFusion's ffmpeg — both Provide() the same virtual capabilities.
+# --allowerasing explicitly authorises the swap. mkosi's Packages=
+# has no per-package --allowerasing flag, so we run dnf ourselves.
+# rpmfusion-free-release the RPM is NOT installed (it would land
+# /etc/yum.repos.d/rpmfusion-free.repo inside the buildroot, and
+# strip_to_sysext_layout deletes /etc anyway — the sandbox-tree path
+# is the clean version).
+# mkosi's SandboxTrees= only exposes /etc/yum.repos.d to its own
+# Packages= dnf pass — postinst's manual dnf doesn't inherit it.
+# Stage the build-only sandbox repos through the shared helper; /etc is
+# stripped before sealing, so no third-party repo file leaks.
+stage_sandbox_repos
+dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y --allowerasing ffmpeg
+
+# GSettings schema cache is no longer compiled per-sysext. Stripping
+# happens unconditionally in strip_to_sysext_layout; a boot-time service
+# (myosi-glib-schemas-compile.service) compiles the merged union across
+# every sysext into /run/myosi/glib-schemas/glib-2.0/schemas/ and
+# /usr/lib/environment.d/40-myosi-glib-schemas.conf exposes it via
+# GSETTINGS_SCHEMA_DIR.
+
+# Unit activation is declarative: static `.wants/` symlinks shipped
+# under mkosi.profiles/desktop/mkosi.extra/usr/lib/systemd/
+# {system,user}/<target>.wants/. Same artifact covers both delivery
+# modes — profile baked into main AND sysext-merged at runtime.
+#
+# Enabled this way:
+#   system multi-user.target → power-profiles-daemon.service,
+#                                flatpak-setup.service
+#   user   sockets.target    → pipewire.socket, pipewire-pulse.socket,
+#                                gnome-keyring-daemon.socket
+#   user   default.target    → wireplumber.service
+#
+# Audio stack needs the user-scope socket activation because nothing in
+# myosi runs `systemctl --user preset-all` per user; without an explicit
+# `.wants/` symlink in /usr (which survives the sysext strip), fresh
+# users boot with pipewire disabled and no audio output.
+
+sysext_write_extension_release desktop
+
+sysext_finalize "$@"

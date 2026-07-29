@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Build NVIDIA sysext — current Turing+ branch, open kernel modules.
+# All build logic lives in mkosi.shared/nvidia-build.sh (shared with
+# the nvidia-580xx sibling sub-image); this wrapper just selects the
+# branch and sources it. The build script in turn sources the generic
+# kmod helpers from mkosi.shared/kmod-build.sh.
+#
+# Sub-image confs cannot set their own BuildSources= (mkosi v26
+# errors with "Setting BuildSources cannot be configured in <X>
+# image"), so cross-sub-image build helpers have to live under
+# mkosi.shared/ even when the logic is domain-specific.
+
+set -euo pipefail
+
+STAGE="${1:-final}"
+[ "$STAGE" = "final" ] || exit 0
+
+export NVIDIA_BRANCH=current
+source "${SRCDIR}/mkosi.shared/nvidia-build.sh"

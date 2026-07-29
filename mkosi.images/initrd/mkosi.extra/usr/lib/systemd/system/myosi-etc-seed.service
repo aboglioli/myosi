@@ -1,0 +1,36 @@
+[Unit]
+Description=Seed empty /etc subvol from /usr/share/factory/etc factory tree + label root
+Documentation=https://github.com/aboglioli/myosi/blob/main/README.md
+DefaultDependencies=no
+# See myosi-data-attach.service for the full dependency rationale.
+# Same rules for every unit in the /etc chain.
+IgnoreOnIsolate=yes
+OnFailure=emergency.target
+After=sysroot-etc.mount
+Wants=sysroot-etc.mount
+Before=initrd.target initrd-switch-root.target
+# Run only when the /etc subvol is empty (first boot on a fresh
+# install, or first boot after an operator wipe). On every subsequent
+# boot /etc is populated and the unit is skipped — the SELinux xattr
+# on the subvol root persists across mounts so re-stamping every boot
+# is not needed. tmpfiles `t /etc` in main system stays as
+# belt-and-suspenders defense against operator restorecon flips.
+ConditionDirectoryNotEmpty=!/sysroot/etc
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+# Inline ExecStart= chain — two binaries, no script. systemd runs them
+# sequentially. cp -a preserves SELinux xattrs of /usr/share/factory/etc files; the
+# directory tree comes out etc_t-labeled because mkosi labels /usr/share/factory/etc
+# as an alias of /etc (postinst-common.sh adds /usr/share/factory/etc /etc to
+# file_contexts.subs before the final relabel). setfattr stamps etc_t
+# on the subvol root inode itself, which is created by `btrfs
+# subvolume create` without any security.selinux xattr.
+ExecStart=/usr/bin/cp -a --reflink=auto /sysroot/usr/share/factory/etc/. /sysroot/etc/
+ExecStart=/usr/bin/setfattr -n security.selinux -v system_u:object_r:etc_t:s0 /sysroot/etc
+
+[Install]
+WantedBy=initrd.target initrd-switch-root.target
