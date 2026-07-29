@@ -1,10 +1,6 @@
-# virt sysext operator commands.
-#
-# This file ships INSIDE the virt sysext (/usr/share/myosi/just/ under
-# the sysext root) and is overlaid into /usr/share/myosi/just/50-virt.just
-# only while the virt sysext is merged. The myosi wrapper discovers it
-# by directory scan, so `myosi virt-setup` appears in `myosi --list`
-# the moment the sysext is active, and disappears when it isn't.
+# virt sysext operator commands — ships inside the sysext, so
+# `myosi virt-setup` appears only while the sysext is merged (the myosi
+# wrapper discovers /usr/share/myosi/just/ by directory scan).
 
 [group('virt')]
 virt-setup *args:

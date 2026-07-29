@@ -1,24 +1,13 @@
 [Unit]
 Description=/home (btrfs subvolume on data-luks)
 Documentation=https://github.com/aboglioli/myosi/blob/main/README.md
-# /var is mounted post-pivot by systemd-gpt-auto-generator from the
-# Type=var partition (DPS GUID 4d21b016-…) with DefaultSubvolume=/var
-# (set in 90-data.conf), same lifecycle as this unit. /home is a
-# sibling subvol of the same LUKS volume — DPS does not express btrfs
-# subvolumes, so we mount it explicitly here in the real root.
-# (/etc is the special case: it must be mounted in the initrd before
-# pivot because PID 1 reads /etc/selinux/config + /etc/systemd/system.conf
-# synchronously at startup; see myosi-data-attach + sysroot-etc.mount
-# in mkosi.images/initrd/.)
-#
-# Bind to the dm-mapper device itself, not var.mount: the actual
-# precondition is /dev/mapper/data existing, not the /var mount being
-# up. Keeps home.mount working even if /var is ever moved off this
-# btrfs (installer profile, tmpfs root, …), and BindsTo= makes
-# home.mount tear down cleanly if the mapper goes away.
+# Sibling subvol of the data-luks btrfs; DPS can't express btrfs
+# subvolumes, so it's mounted explicitly here. (/etc must instead be
+# mounted in the initrd — PID 1 reads it synchronously at startup.)
+# Bind to the mapper device, not var.mount: the real precondition is
+# /dev/mapper/data existing, and BindsTo= tears down cleanly.
 After=dev-mapper-data.device
 BindsTo=dev-mapper-data.device
-# Mounted before users can log in.
 Before=local-fs.target
 
 [Mount]

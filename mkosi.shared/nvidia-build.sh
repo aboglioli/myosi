@@ -1,29 +1,10 @@
 #!/usr/bin/env bash
-# NVIDIA sysext build logic. Sourced by:
-#   mkosi.images/nvidia/mkosi.postinst         (NVIDIA_BRANCH=current — Turing+, open kmod)
-#   mkosi.images/nvidia-580xx/mkosi.postinst   (NVIDIA_BRANCH=580xx  — Maxwell/Pascal/Volta, proprietary)
-#
-# Lives under nvidia/ rather than mkosi.shared/ because the logic is
-# NVIDIA-specific; the only generic primitives (bind-mount /dev+/proc
-# + chroot helpers) are sourced from mkosi.shared/kmod-build.sh.
-#
-# Caller must:
-#   - have already done `set -euo pipefail` and the STAGE != final guard
-#   - have BUILDROOT exported (mkosi does this)
-#   - export NVIDIA_BRANCH before sourcing
-#
-# Approach (improvements over myos/profiles/nvidia.sh):
-#   - kmod lives in a signed sysext, NOT baked into base image. Hosts
-#     without NVIDIA carry zero NVIDIA weight.
-#   - No bootc kargs.d (UKI cmdline + modprobe.d directly).
-#   - No dracut force_drivers (sysext at runtime, not initramfs).
-#   - Switching branches at runtime = swap sysext + reboot, no bootc switch.
-#
-# Build-time constraints carried over from myos:
-#   - akmods CLI uses runuser (setuid) which fails in rootless build —
-#     drive rpmbuild ourselves.
-#   - rpmbuild needs /usr/src access → run inside chroot. Packages
-#     installed via dnf5 --installroot from host side.
+# NVIDIA sysext build. Sourced by mkosi.images/nvidia/mkosi.postinst
+# (NVIDIA_BRANCH=current — Turing+, open kmod) and nvidia-580xx
+# (Maxwell/Pascal/Volta, proprietary). Caller must set -euo pipefail,
+# guard STAGE, and export NVIDIA_BRANCH; BUILDROOT comes from mkosi.
+# akmods CLI needs runuser (setuid — fails in rootless builds), so we
+# drive rpmbuild ourselves inside the chroot.
 
 case "${NVIDIA_BRANCH:?must be set by caller (current or 580xx)}" in
     current)
@@ -66,16 +47,9 @@ echo "Building nvidia${PKG_SUFFIX} sysext: branch=$NVIDIA_BRANCH kver=$KVER"
 
 . "${SRCDIR}/mkosi.shared/sysext-build.sh"
 
-# Build deps + userspace + akmod source.
-#
-# All three external repos this needs (RPMFusion-free, RPMFusion-
-# nonfree, NVIDIA container toolkit) ship at the top-level
-# myosi/mkosi.sandbox/etc/yum.repos.d/. mkosi exposes them to its OWN
-# `Packages=` dnf pass via SandboxTrees=, but this script runs dnf
-# from inside the postinst — a separate invocation that doesn't
-# automatically inherit the sandbox repo dir. Stage the build-only
-# sandbox repos through the shared helper; /etc is stripped before
-# sealing, so no third-party repo file leaks.
+# Build deps + userspace + akmod source. Postinst-run dnf doesn't
+# inherit mkosi's sandbox repo dir (only mkosi's own dnf pass does), so
+# stage the repos; /etc is stripped before sealing, nothing leaks.
 stage_sandbox_repos
 
 dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y \
@@ -90,10 +64,9 @@ dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y \
     libva-nvidia-driver \
     egl-wayland
 
-# nvidia-container-toolkit gets its own dnf invocation because rpm's
-# sig check fails on the upstream toolkit RPMs (NVIDIA's signing
-# infra has known gaps). %_pkgverify_level none + tsflags=nocrypto
-# accept the install for the duration of this transaction only.
+# Separate dnf invocation: rpm's sig check fails on upstream toolkit
+# RPMs; %_pkgverify_level none + tsflags=nocrypto scoped to this
+# transaction only.
 mkdir -p "$BUILDROOT/etc/rpm"
 printf '%%_pkgverify_level none\n' > "$BUILDROOT/etc/rpm/macros.verify"
 dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y \
@@ -112,12 +85,8 @@ done
 
 [ -f "$BUILDROOT$SRPM_PATH" ] || { echo "ERROR: $SRPM_PATH not in buildroot" >&2; exit 1; }
 
-# Shared helper for running cmds inside BUILDROOT with real /dev,
-# /proc, /sys (bind-mount + chroot). Required so nvidia-kmod's
-# `conftest` step can probe the kernel headers without writing gcc
-# error output back into its own generated macros.h — see
-# kmod-build.sh for the long-form reason. Hoist any future ZFS /
-# WireGuard / other out-of-tree kmod through the same helper.
+# kmod_exec: chroot with real /dev /proc /sys so nvidia-kmod's conftest
+# probes work — see kmod-build.sh.
 . "${SRCDIR}/mkosi.shared/kmod-build.sh"
 
 # 3. rpmbuild the kmod inside the buildroot.
@@ -136,11 +105,8 @@ kmod_exec rpmbuild --rebuild \
 KMOD_RPM=$(find "$BUILDDIR_ABS/RPMS" -name "kmod-${KMOD_NAME}-*.rpm" -not -name "*debug*" | head -1)
 [ -n "$KMOD_RPM" ] || { echo "ERROR: built kmod RPM not found" >&2; exit 1; }
 echo "Installing built kmod: ${KMOD_RPM#$BUILDROOT}"
-# dnf5 --installroot resolves package paths from the HOST filesystem,
-# not from inside the installroot — so pass the full host-visible path
-# (no $BUILDROOT strip). myos's bootc build ran the whole script INSIDE
-# the container so the stripped path worked there; in the mkosi sandbox
-# we live outside the buildroot.
+# dnf5 --installroot resolves package paths from the HOST filesystem —
+# pass the full host-visible path, no $BUILDROOT strip.
 dnf5 --installroot="$BUILDROOT" install -y "$KMOD_RPM"
 
 # 4. depmod inside the buildroot.
@@ -176,18 +142,12 @@ else
     exit 1
 fi
 
-# 5b. Sign every nvidia*.ko module with boot.key. Required because the
-#     base UKI cmdline carries module.sig_enforce=1 — see
-#     kmod_sign_modules in kmod-build.sh for the long-form rationale.
+# 5b. Sign nvidia*.ko with boot.key (module.sig_enforce=1 — see
+#     kmod_sign_modules in kmod-build.sh).
 kmod_sign_modules "nvidia${PKG_SUFFIX}" -name 'nvidia*.ko*'
 
-# 6. Modprobe + modules-load config.
-#
-# 6a. modprobe.d — module OPTIONS only. Nouveau / nova_core blacklist
-#     policy lives in the UKI's KernelCommandLine= (see mkosi.conf
-#     module_blacklist=...) so it's effective from initrd onward
-#     without depending on modprobe.d landing in time. Keep this file
-#     scoped to nvidia tuning knobs.
+# 6a. modprobe.d — module OPTIONS only; nouveau/nova_core blacklist
+#     policy lives in the UKI cmdline (mkosi.conf module_blacklist=).
 mkdir -p "$BUILDROOT/usr/lib/modprobe.d"
 cat > "$BUILDROOT/usr/lib/modprobe.d/50-nvidia.conf" <<EOF
 options nvidia_drm modeset=1 fbdev=1
@@ -196,19 +156,9 @@ options nvidia NVreg_EnableGpuFirmware=$GPU_FIRMWARE
 options nvidia NVreg_DynamicPowerManagement=0x02
 EOF
 
-# 6b. modules-load.d — force the modeset + DRM modules at boot.
-#
-#     The nvidia core module loads when udev probes PCI 0000:01:00.0,
-#     but nvidia_modeset and nvidia_drm have NO softdep/Alias chain
-#     pulling them in. Without explicit load:
-#       - no /dev/dri/card1 for nvidia → external HDMI/DP wired to the
-#         dGPU never enumerates as DRM connectors → niri/sway see only
-#         the iGPU outputs → "plugging in a monitor does nothing"
-#       - no /dev/nvidia-modeset → KMS/DPMS disabled, glamor fallback
-#         on the iGPU only, no reverse-PRIME offload to nvidia
-#       - nvidia-smi can hang waiting on uninitialized modeset state
-#     systemd-modules-load.service runs the file at boot, after the
-#     erofs root is up but before the user session.
+# 6b. modules-load.d — nvidia_modeset/nvidia_drm have NO softdep/alias
+#     chain; without explicit load the dGPU never enumerates DRM
+#     connectors (external outputs dead) and modeset stays disabled.
 mkdir -p "$BUILDROOT/usr/lib/modules-load.d"
 cat > "$BUILDROOT/usr/lib/modules-load.d/50-nvidia.conf" <<EOF
 nvidia
@@ -216,46 +166,30 @@ nvidia_modeset
 nvidia_drm
 EOF
 
-# 7. Strip build artifacts + dev packages before sealing the sysext.
-#
-# Order matters: drop the /dev /proc bind mounts FIRST, then run the
-# dnf5 transaction. dnf5 refuses to apply a remove transaction when
-# the installroot contains live bind mounts it didn't put there (the
-# 93-package remove transaction aborts immediately after printing
-# the summary with exit code 32 — observed empirically). After
-# unmount the buildroot is a plain directory tree again and the
-# transaction completes cleanly.
+# 7. Strip build artifacts + dev packages before sealing. Order
+# matters: drop the bind mounts FIRST — dnf5 aborts a remove
+# transaction (exit 32) when the installroot has foreign bind mounts.
 rm -rf "$BUILDDIR_ABS"
 kmod_unmount
 
 dnf5 --installroot="$BUILDROOT" remove -y \
     akmods rpm-build gcc gcc-c++ make \
     "kernel-devel-${KVER}" 2>/dev/null || true
-# rpmfusion-free-release and rpmfusion-nonfree-release are NOT in this
-# remove list — the repo files come from mkosi.sandbox now, the
-# release RPMs were never installed.
+# rpmfusion-*-release aren't in the remove list — the repo files come
+# from mkosi.sandbox; the release RPMs were never installed.
 
-# dnf5's rpm scriptlet pass mounts /proc + /dev into the installroot
-# for the duration of the transaction and DOES NOT unmount them on
-# exit. Walk the buildroot one more time and drop anything still bound
-# there — strip_to_sysext_layout's `rm -rf` would otherwise operate on
-# live /proc inodes and the entire postinst aborts with EPERM.
+# dnf5 scriptlets leave /proc + /dev mounted in the installroot; sweep
+# again or strip_to_sysext_layout hits live /proc inodes (EPERM).
 kmod_unmount_all_under "$BUILDROOT"
 
-# 7b. Re-run depmod (the dnf remove transaction wiped the index files
-#     that the in-chroot kmod_exec depmod -a left earlier) and mark
-#     the result so mkosi v26's content-hash de-duplicator preserves
-#     it instead of dropping it as identical to base-tree's stock
-#     kernel-modules-core copy. See kmod-build.sh for full background.
+# 7b. Re-run depmod (dnf remove wiped the earlier index) — see
+#     kmod-build.sh.
 kmod_depmod_after_strip
 kmod_mark_indices_unique "nvidia${PKG_SUFFIX}"
 
-# Sanity check: refuse to ship a nvidia sysext without nvidia.ko
-# indexed. When NVIDIA_BUILD_OPTIONAL=1 (set by the nvidia-580xx
-# legacy branch when the proprietary driver hasn't kept up with a
-# new Fedora kernel), fall back to an empty sysext stub instead of
-# failing the entire release pipeline — deployed hosts keep their
-# last-good sysext via systemd-sysext version precedence.
+# Refuse to ship without nvidia.ko indexed. NVIDIA_BUILD_OPTIONAL=1
+# (legacy branch on a too-new kernel) ships an empty stub instead of
+# failing the release; hosts keep their last-good sysext.
 if ! kmod_indexed "extra/nvidia/nvidia.ko"; then
     if [ "${NVIDIA_BUILD_OPTIONAL:-0}" = "1" ]; then
         echo "WARN: nvidia.ko not indexed; NVIDIA_BUILD_OPTIONAL=1" >&2
@@ -269,17 +203,11 @@ if ! kmod_indexed "extra/nvidia/nvidia.ko"; then
     exit 1
 fi
 
-# 8. Finalize sysext: policy stage → strip non-sysext layout.
-#    Unit activation is declarative: static `.wants/` symlinks shipped
-#    under mkosi.images/${NVIDIA_BRANCH}/mkosi.extra/usr/lib/systemd/
-#    system/multi-user.target.wants/ for nvidia-cdi-refresh.service and
-#    nvidia-cdi-refresh.path. mkosi.extra is laid down BEFORE the rpm
-#    install, so the symlinks pre-exist and point at the units the
-#    nvidia-container-toolkit package will install. No imperative
-#    sysext_uphold_*/sysext_enable_* call needed.
+# 8. Finalize. Unit activation is declarative: static .wants/ symlinks
+#    ship in the sub-image's mkosi.extra (laid down before the rpm
+#    install, pointing at units the toolkit package installs).
 
-# 9. Write extension-release: shared envelope from sysext-build.sh
-#    plus kernel pin + reload manager marker for this kmod sysext.
+# 9. Extension-release: shared envelope + kernel pin.
 sysext_write_extension_release "$EXT_REL_NAME" \
     "SYSEXT_KERNEL_RELEASE=${KVER}"
 

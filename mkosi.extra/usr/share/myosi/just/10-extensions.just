@@ -35,9 +35,7 @@ extension-enable name version="":
         [ -n "$VERSION" ] || { echo "ERROR: failed to resolve release version" >&2; exit 5; }
     fi
 
-    # Sysext asset names match the build (Output=%i_%v_%a per
-    # sub-image): <feature>_<VER>_<ARCH>.raw. Resolve the host's
-    # arch token before downloading so we don't grab the wrong build.
+    # Asset name matches the build (Output=%i_%v_%a): <feature>_<VER>_<ARCH>.raw.
     ARCH=$(uname -m | sed -e 's/^x86_64$/x86-64/' -e 's/^aarch64$/arm64/')
     ASSET="{{name}}_${VERSION}_${ARCH}.raw"
     TMPDIR=$(mktemp -d)

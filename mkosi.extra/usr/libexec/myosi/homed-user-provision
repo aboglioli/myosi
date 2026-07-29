@@ -1,56 +1,10 @@
 #!/usr/bin/env bash
-# Provision a homed-managed user: create the record from the declarative
-# identity at /usr/share/myosi/users/<name>.user if it doesn't exist,
-# then bind the user to groups declared by currently-active sysexts /
-# profile features under /usr/share/myosi/user-groups.d/.
-#
-# Invoked by:
-#   1. myosi-homed-user@<name>.service at boot (WantedBy=multi-user.target)
-#   2. refresh_sysext() in lib.sh after a live systemd-sysext refresh —
-#      `systemctl start myosi-homed-user@<name>.service` re-runs the
-#      bind phase so a sysext that just brought a new group online
-#      (libvirt, incus-admin) becomes effective without a reboot.
-#
-# Why this lives outside systemd-homed.service.d/ ExecStartPost:
-#   systemd-homed is Type=notify and sends READY=1 BEFORE ExecStartPost
-#   runs, so "Started systemd-homed.service" prints even when user
-#   creation fails — masking the failure. ExecStartPost stderr also
-#   only reaches the journal, not the serial console, so first-boot
-#   provisioning failures were invisible during VM bring-up. Splitting
-#   user provisioning into its own templated unit decouples the
-#   lifecycle (`systemctl status myosi-homed-user@user` reflects
-#   the actual provisioning outcome), gives us per-user
-#   StandardError=journal+console, and scales to multiple users via
-#   plain `systemctl enable myosi-homed-user@<name>.service`.
-#
-# Password delivery on Fedora 44 (systemd 259):
-#   systemd-homed 259 does NOT process the secret section of an
-#   identity passed via `--identity=`. Auto-iterate of credstore
-#   home.create.* records + secret.password extraction landed in
-#   systemd 260+ (not on F44). We bootstrap the LUKS keyslot with
-#   `PASSWORD=changeme NEWPASSWORD=changeme` env vars — homectl's
-#   acquire_existing_password() / acquire_new_password() honor them.
-#   Operator rotates post-install via `homectl passwd <name>`. When
-#   F45 ships systemd 260+, the bootstrap section can move into the
-#   identity JSON's secret.password and the env-var path becomes
-#   redundant.
-#
-# Why --luks-extra-mount-options=defcontext=...:
-#   homectl does NOT label the filesystem inside the LUKS image.
-#   Without this flag every file in the inner btrfs ends up as
-#   unlabeled_t at activation → SELinux denies sudo, sshd reading
-#   ~/.ssh/authorized_keys, dbus session services, gnome-keyring
-#   socket. defcontext= forces the mount-time label to
-#   user_home_dir_t — same outcome as a restorecon walk, but without
-#   the per-boot cost and without depending on the SELinux policy
-#   being loaded at activation time.
-#   Reference: https://discussion.fedoraproject.org/t/72690
-#
-# Idempotency:
-#   Phase 1 (create) — gated by `homectl inspect` so re-running is a
-#   no-op once the user exists.
-#   Phase 2 (group bind) — `gpasswd -a` is file-level idempotent; we
-#   pre-check membership to keep journal noise to actual changes only.
+# Provision a homed-managed user from /usr/share/myosi/users/<name>.user,
+# then bind it to groups declared under /usr/share/myosi/user-groups.d/.
+# Runs as templated myosi-homed-user@<name>.service — NOT homed
+# ExecStartPost: homed is Type=notify and sends READY=1 before ExecStartPost,
+# masking provisioning failures (and hiding them from the console).
+# Re-triggered after live sysext refresh to bind new groups. Idempotent.
 
 set -euo pipefail
 
@@ -65,6 +19,12 @@ if [ ! -f "$IDENTITY" ]; then
 fi
 
 # Phase 1 — create user record + LUKS-backed home if missing.
+# PASSWORD/NEWPASSWORD env: homed 259 (F44) ignores the secret section of
+# --identity= (fixed in 260+); homectl honors these env vars instead.
+# Operator rotates via `homectl passwd`.
+# defcontext=: homectl doesn't label the fs inside the LUKS image — without
+# it everything mounts unlabeled_t and SELinux denies sudo, sshd
+# authorized_keys, keyring (https://discussion.fedoraproject.org/t/72690).
 if ! homectl inspect "$NAME" >/dev/null 2>&1; then
     echo "homed-user-provision: creating homed record for '$NAME' from $IDENTITY" >&2
     PASSWORD="$BOOTSTRAP_PASSWORD" NEWPASSWORD="$BOOTSTRAP_PASSWORD" \
@@ -79,10 +39,8 @@ if ! homectl inspect "$NAME" >/dev/null 2>&1; then
 fi
 
 # Phase 2 — bind user to groups declared by active sysexts / profile
-# features. Drop-in files ship from each feature's
-# mkosi.profiles/<feat>/mkosi.extra/usr/share/myosi/user-groups.d/ and
-# the matching sysext sub-image pulls the same tree via ExtraTrees, so
-# the snippet is visible in both bake paths from a single source.
+# features. Drop-ins ship from each feature's mkosi.extra AND its sysext
+# sub-image (same source tree via ExtraTrees), so both bake paths see them.
 [ -d "$DROP_DIR" ] || exit 0
 
 declare -A wanted
@@ -98,9 +56,8 @@ done
 
 for group in "${!wanted[@]}"; do
     if ! getent group "$group" >/dev/null 2>&1; then
-        # Group not yet in NSS — the declaring sysext is active but
-        # its own sysusers.d may not have run yet, or the group name
-        # is a typo. Skip silently; next trigger retries.
+        # Group not in NSS yet (declaring sysext's sysusers.d may not have
+        # run). Skip silently; next trigger retries.
         continue
     fi
     if ! id -nG "$NAME" 2>/dev/null | tr ' ' '\n' | grep -qx "$group"; then

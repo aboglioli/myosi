@@ -1,36 +1,14 @@
 #!/usr/bin/env bash
-# Single source of truth for ImageVersion across base + every sub-image.
-# mkosi reads this file's stdout (it's executable) and uses the output as
-# the ImageVersion= value.
-#
-# Formats accepted:
-#   YYYY.MM.DD.NN              stable release        (2026.06.03.01)
-#   YYYY.MM.DD.NN-rc.N         release candidate     (2026.06.03.01-rc.1)
-#   YYYY.MM.DD.NN-beta.N       beta prerelease       (2026.06.03.01-beta.2)
-#   YYYY.MM.DD.NN-alpha.N      alpha prerelease      (2026.06.03.01-alpha.3)
-#
-# The .NN suffix is a same-day build counter (01, 02, ...) that increments
-# every time `just build` is invoked, and resets to 01 on a new day. The
-# prerelease suffix is only ever set via $MYOSI_VERSION (CI workflow) — the
-# local build path never emits prerelease versions automatically.
-#
-# Resolution order:
-#   1. $MYOSI_VERSION env var (CI release tag, dispatch input, or explicit override)
-#   2. Git tag of HEAD matching one of the formats above. Tags are bare — no
-#      leading 'v' or 'myosi-' prefix — so sysupdate URLs resolve to release
-#      assets directly via @v interpolation.
-#   3. Today's UTC date + persistent counter from build/.version-counter
-#
-# Caching: mkosi invokes this script once per (sub-)image during a single
-# build, potentially ~10 times within seconds. To keep the version stable
-# across all of those, we cache the result in build/.version-current with
-# an mtime-based freshness window (CACHE_TTL seconds). A fresh build session
-# more than CACHE_TTL after the last invocation gets a new counter value.
+# Single source of truth for ImageVersion (mkosi runs this executable
+# and uses its stdout). Format: YYYY.MM.DD.NN[-alpha|-beta|-rc.N].
+# Resolution: $MYOSI_VERSION → exact git tag of HEAD (bare, no 'v'
+# prefix, so sysupdate @v resolves release assets) → UTC date + counter.
+# mkosi invokes this ~10x per build; build/.version-current caches the
+# result (mtime TTL) so every sub-image agrees on one version.
 
 set -euo pipefail
 
-CACHE_TTL=300  # 5 min; longer than the time between mkosi sub-image dispatches,
-               # shorter than the gap between two distinct `just build` runs.
+CACHE_TTL=300  # longer than sub-image dispatch gaps, shorter than distinct build runs
 
 if [ -n "${MYOSI_VERSION:-}" ]; then
     printf '%s' "$MYOSI_VERSION"
@@ -42,7 +20,7 @@ if [[ "$TAG" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}(-(alpha|beta|rc)\.[0-9]+
     printf '%s' "$TAG"
     exit 0
 fi
-# Backwards-compat: accept legacy YYYY.MM.DD tags (no .NN), pad to .01.
+# Legacy YYYY.MM.DD tags (no .NN) pad to .01.
 if [[ "$TAG" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$ ]]; then
     printf '%s.01' "$TAG"
     exit 0
@@ -63,8 +41,7 @@ if [ -f "$CURRENT_FILE" ]; then
     AGE=$((NOW - MTIME))
     if [ "$AGE" -lt "$CACHE_TTL" ]; then
         CACHED=$(cat "$CURRENT_FILE")
-        # Only honor the cache if its date prefix matches today — otherwise
-        # the day rolled over mid-cache-window and we want a fresh counter.
+        # Ignore the cache if the day rolled over mid-window.
         if [[ "$CACHED" == "$TODAY".* ]]; then
             printf '%s' "$CACHED"
             exit 0

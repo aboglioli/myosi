@@ -1,46 +1,14 @@
 #!/usr/bin/env bash
-# Shared OpenZFS sysext build logic. Sourced by
-# mkosi.images/zfs/mkosi.postinst.
-#
-# Caller must:
-#   - have already done `set -euo pipefail` and the STAGE != final guard
-#   - have BUILDROOT exported (mkosi does this)
-#
-# Build path — upstream tarball → SRPM → rpmbuild via kmod_exec.
-# Does NOT rely on the OpenZFS Fedora repo (zfsonlinux.org/fedora/);
-# upstream's repo only goes up to fc42 today and lags new Fedora
-# releases by months. By generating SRPMs from the GitHub release
-# tarball directly, we ride the same release cadence as OpenZFS's
-# stable line — bump $ZFS_VERSION when a new tag drops and rebuild.
-#
-# Steps:
-#   1. Install autotools + gcc + kernel-devel + libraries needed by
-#      OpenZFS's ./configure + make srpm-utils srpm-kmod.
-#   2. Download zfs-${ZFS_VERSION}.tar.gz from GitHub releases.
-#   3. ./configure + make srpm-utils srpm-kmod via kmod_exec — emits
-#      zfs-${ZFS_VERSION}-1.fc44.src.rpm (userspace) and
-#      zfs-kmod-${ZFS_VERSION}-1.fc44.src.rpm (kmod) under
-#      /tmp/zfs-src/SRPMS/ inside the buildroot.
-#   4. rpmbuild --rebuild both SRPMs via kmod_exec. RPMS land under
-#      /tmp/zfs-src/RPMS/.
-#   5. dnf5 install the built RPMs into the installroot.
-#   6. depmod + sign every zfs / spl / zcommon / znvpair / zlua /
-#      zunicode / zzstd / icp .ko with boot.key.
-#   7. Strip build deps + tarball + SRPM/RPMS staging.
-#   8. Seal sysext.
-#
-# Version skew / soft-fail:
-#   ZFS_BUILD_OPTIONAL=1 catches failures at every stage that can
-#   fail when upstream OpenZFS doesn't support the current kernel
-#   yet (e.g. ./configure rejecting Linux-Maximum, rpmbuild hitting
-#   API breakage). On soft-fail the postinst exits 0 with an empty
-#   stub so CI keeps shipping the rest of the release; deployed
-#   hosts keep their prior working zfs sysext via systemd-sysext
-#   version precedence.
+# OpenZFS sysext build. Sourced by mkosi.images/zfs/mkosi.postinst
+# (caller does set -euo pipefail + STAGE guard; BUILDROOT from mkosi).
+# Builds upstream GitHub tarball → SRPMs → rpmbuild via kmod_exec; the
+# zfsonlinux.org repo lags new Fedora releases by months. On kernels
+# upstream doesn't support yet, ZFS_BUILD_OPTIONAL=1 soft-fails to an
+# empty stub so CI ships the rest of the release and deployed hosts
+# keep their last-good zfs sysext via version precedence.
 
-# Bump this when OpenZFS publishes a new stable. The release META at
-# https://github.com/openzfs/zfs/blob/master/META declares the
-# Linux-Maximum it supports. Don't bump past that for our kernel.
+# Bump on new OpenZFS stable; don't bump past the Linux-Maximum
+# declared in upstream's META for our kernel.
 ZFS_VERSION="${ZFS_VERSION:-2.4.2}"
 
 KVER=$(ls "$BUILDROOT/usr/lib/modules/" 2>/dev/null | head -1)
@@ -61,14 +29,9 @@ bailout_if_optional() {
     exit "$status"
 }
 
-# 1. Install build deps. The set matches OpenZFS's documented
-#    Fedora/RHEL build dependencies (per
-#    openzfs.github.io/openzfs-docs/Developer Resources/Building ZFS.html)
-#    so ./configure picks up every optional feature instead of
-#    silently disabling things. Cross-kernel build of the kmod
-#    happens via `rpmbuild --rebuild --define "kernels $KVER"` from
-#    the kernel-agnostic SRPM later — kernel-devel-${KVER} is what
-#    that rebuild step links against.
+# 1. Build deps — matches OpenZFS's documented Fedora set so
+#    ./configure enables every feature instead of silently disabling.
+#    kernel-devel-${KVER} is what the later cross-kernel rebuild links against.
 set +e
 dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y \
     akmods gcc gcc-c++ make rpm-build kmod tar gzip \
@@ -102,25 +65,15 @@ if [ "$ZFS_BUILD_BAILOUT" -eq 0 ]; then
     fi
 fi
 
-# Shared helpers — kmod_exec runs chroot with real /dev /proc bound,
-# kmod_unmount drops them before sysext sealing, kmod_unmount_all_under
-# cleans up any /proc /dev re-mounts dnf5's rpm scriptlet pass leaves
-# behind. See mkosi.shared/kmod-build.sh for the long-form reason.
+# Shared kmod helpers (chroot with real /dev /proc + unmount sweeps) —
+# see mkosi.shared/kmod-build.sh.
 . "${SRCDIR}/mkosi.shared/kmod-build.sh"
 
-# 3. Extract + configure + make srpm-utils srpm-kmod inside the
-#    buildroot. Run autogen.sh as a safety net — release tarballs
-#    ship the autotools artifacts already, so autogen is a no-op,
-#    but a git checkout or a partially-stripped tarball would
-#    otherwise fail at ./configure. All in one sh -c so the chroot
-#    crosses once and configure's state persists into make srpm-*.
-#
-# Why srpm-utils + srpm-kmod (vs `make rpm`):
-#   `make rpm` builds binary RPMs against the running kernel only
-#   — fine if uname -r == $KVER, fatal otherwise. Splitting into
-#   SRPMs lets the subsequent `rpmbuild --rebuild --define
-#   "kernels $KVER"` cross-build the kmod against an arbitrary
-#   kernel (the buildroot's, not the host's).
+# 3. Extract + configure + make srpm-utils srpm-kmod, all in one sh -c
+#    so configure's state persists. autogen.sh is a no-op safety net.
+#    SRPMs (not `make rpm`) so the later `rpmbuild --rebuild --define
+#    "kernels $KVER"` cross-builds against the buildroot's kernel, not
+#    the host's.
 if [ "$ZFS_BUILD_BAILOUT" -eq 0 ]; then
     set +e
     kmod_exec sh -c "
@@ -183,10 +136,8 @@ if [ "$ZFS_BUILD_BAILOUT" -eq 0 ]; then
     fi
 fi
 
-# If we bailed out at any stage, ship an empty stub. The sealed sysext
-# won't have /usr/lib/modules content, won't merge on a real host
-# (SYSEXT_KERNEL_RELEASE pins it to this build's $KVER), and operators
-# keep their last-good zfs sysext via systemd-sysext version precedence.
+# On bailout ship an empty, kernel-pinned stub; operators keep their
+# last-good zfs sysext via version precedence.
 if [ "$ZFS_BUILD_BAILOUT" -eq 1 ]; then
     rm -rf "$BUILDROOT$ZFS_SRC_REL"
     kmod_unmount
@@ -195,18 +146,10 @@ if [ "$ZFS_BUILD_BAILOUT" -eq 1 ]; then
     return 0
 fi
 
-# 5. Install built RPMs into the installroot. The kmod and userspace
-#    have to land in a SINGLE dnf transaction — userspace zfs requires
-#    `zfs-kmod = ${ZFS_VERSION}` which only the binary kmod-zfs RPM
-#    provides, and dnf can't resolve that across two separate
-#    --installroot calls (the first one's rpmdb isn't visible until
-#    the transaction commits). Hand dnf the whole non-debug, non-devel,
-#    non-test set at once and let it order the install graph.
-#
-# kmod selection: target the kernel-suffixed binary kmod
-# (`kmod-zfs-${KVER}-${ZFS_VERSION}-*.rpm`) and exclude the meta /
-# devel / debuginfo siblings. find with a literal name pattern
-# treats dots as literals, so $KVER's dots match exactly.
+# 5. Install built RPMs in a SINGLE dnf transaction: userspace zfs
+#    requires `zfs-kmod = ${ZFS_VERSION}`, which dnf can't resolve
+#    across two separate --installroot calls. Select the kernel-
+#    suffixed binary kmod; exclude meta/devel/debug siblings.
 RUNTIME_RPMS=$(find "$BUILDDIR_ABS/RPMS" -name '*.rpm' \
     -not -name '*debug*' -not -name '*-devel-*' -not -name '*-test-*' \
     -not -name '*src.rpm' \
@@ -227,16 +170,14 @@ dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y $RUNTIME_RPMS
 # 6. depmod inside the buildroot.
 kmod_exec depmod -a "$KVER"
 
-# 7. Sign every ZFS / SPL kernel module with boot.key. See
-#    kmod_sign_modules in kmod-build.sh for the long-form rationale.
+# 7. Sign ZFS/SPL modules with boot.key (see kmod-build.sh).
 kmod_sign_modules zfs -path '*/extra/*' \
     \( -name 'zfs*.ko*' -o -name 'spl.ko*' -o -name 'zcommon.ko*' \
     -o -name 'znvpair.ko*' -o -name 'zlua.ko*' -o -name 'zunicode.ko*' \
     -o -name 'zzstd.ko*' -o -name 'icp.ko*' \)
 
-# 8. Strip build artifacts + dev packages before sealing the sysext.
-#    Same dance as nvidia: drop bind mounts BEFORE dnf5 remove, then
-#    a second sweep after to catch dnf5 scriptlet re-mounts.
+# 8. Strip build artifacts + dev packages before sealing. Same dance
+#    as nvidia: unmount before dnf5 remove, sweep again after.
 rm -rf "$BUILDROOT$ZFS_SRC_REL"
 kmod_unmount
 
@@ -251,9 +192,7 @@ dnf5 --installroot="$BUILDROOT" remove -y \
 
 kmod_unmount_all_under "$BUILDROOT"
 
-# 8b. Re-run depmod, mark indices unique so mkosi v26 de-dup keeps
-#     them, assert zfs.ko is indexed. See kmod-build.sh for full
-#     background on each of the three steps.
+# 8b. Re-run depmod + assert zfs.ko is indexed (see kmod-build.sh).
 kmod_depmod_after_strip
 kmod_mark_indices_unique zfs
 
@@ -264,8 +203,7 @@ if ! kmod_indexed "extra/zfs/zfs.ko"; then
     exit 1
 fi
 
-# 9. Write extension-release: shared envelope from sysext-build.sh
-#    plus kernel pin + reload manager marker for this kmod sysext.
+# 9. Extension-release: shared envelope + kernel pin.
 . "${SRCDIR}/mkosi.shared/sysext-build.sh"
 sysext_write_extension_release zfs \
     "SYSEXT_KERNEL_RELEASE=${KVER}"

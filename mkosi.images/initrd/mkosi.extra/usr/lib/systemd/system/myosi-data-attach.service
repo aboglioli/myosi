@@ -2,29 +2,13 @@
 Description=Attach myosi data-luks pool (LUKS unlock + btrfs scan)
 Documentation=https://github.com/aboglioli/myosi/blob/main/README.md
 DefaultDependencies=no
-# Why all the dependency hygiene here is necessary:
-#   * IgnoreOnIsolate=yes — initrd-cleanup.service runs `systemctl
-#     --no-block isolate initrd-switch-root.target` immediately before
-#     pivot. Without this flag, the isolate's stop pass would stop
-#     this unit and cascade-stop the rest of the /etc chain.
-#   * Wants= (NOT Requires=) on upstream units — the upstream units
-#     (sysroot.mount, systemd-repart.service) are NOT in
-#     initrd-switch-root.target's transaction, so the isolate stops
-#     them. Requires= would cascade-stop this unit; Wants= does not.
-#     IgnoreOnIsolate=yes does NOT block Requires= cascade-stops.
-#   * OnFailure=emergency.target — if data-attach fails (LUKS unlock
-#     fails, btrfs scan fails), drop to the emergency shell rather
-#     than pivot into a broken state. Each unit in the chain
-#     (sysroot-etc.mount, myosi-etc-seed.service) has the same hook.
-#   * Before=initrd.target — keeps the target from "reaching" until
-#     this oneshot completes; the .wants symlink in initrd.target.wants/
-#     adds the dependency edge, Before= adds the ordering.
-#   * Static .wants symlinks ship in initrd.target.wants/ (pulls the
-#     chain into the normal initrd transaction) AND
-#     initrd-switch-root.target.wants/ (preserves the chain through
-#     the isolate). mkosi-initrd does NOT run preset-all, so [Install]
-#     WantedBy= alone is inert; the symlinks are what actually
-#     activate the unit.
+# Dependency hygiene (applies to the whole /etc chain): IgnoreOnIsolate
+# survives the pre-pivot isolate; Wants= NOT Requires= on upstream units
+# (they're outside initrd-switch-root's transaction — Requires= would
+# cascade-stop us, and IgnoreOnIsolate doesn't block that); OnFailure
+# drops to emergency instead of pivoting broken; static .wants symlinks
+# in BOTH initrd.target.wants/ and initrd-switch-root.target.wants/ are
+# what activate the unit — mkosi-initrd never runs preset-all.
 IgnoreOnIsolate=yes
 OnFailure=emergency.target
 After=sysroot.mount systemd-repart.service systemd-udevd.service systemd-udev-settle.service cryptsetup-pre.target
@@ -36,11 +20,7 @@ Conflicts=shutdown.target
 Type=oneshot
 RemainAfterExit=yes
 TimeoutSec=infinity
-# Mirror script stdout+stderr to the initrd console (tty0) AND the
-# journal. Without console output the script's `echo` and any error
-# from systemd-cryptsetup never reach the framebuffer — silent boot
-# hang when LUKS unlock or btrfs scan fails. The mirror also makes
-# `bash -x` runs from a rescue shell visible at the framebuffer.
+# Mirror to console — without it a LUKS/btrfs failure is a silent hang.
 StandardOutput=journal+console
 StandardError=journal+console
 ExecStart=/usr/libexec/myosi/data-attach

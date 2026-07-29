@@ -1,32 +1,11 @@
 #!/usr/bin/env bash
 #
-# One-shot host integration for the myosi virt sysext.
-#
-# Idempotent. Re-runs are safe — every step checks for existing state
-# before creating. Operator runs once after `extension-enable virt`;
-# subsequent reboots need nothing.
-#
-# What it does:
-#
-#   1. (default, --skip-bridge to skip)
-#      Creates a host NetworkManager bridge `br0` enslaving the
-#      operator's chosen physical iface. VMs that attach to this
-#      bridge get DHCP from the LAN router — peers of the host.
-#
-#   2. Defines libvirt networks:
-#        default   NAT 192.168.122/24 via virbr0
-#                  (from /usr/share/libvirt/networks/default.xml)
-#        br0       <forward mode='bridge'/> pointing at the host br0
-#                  (only if br0 exists at the time of the run)
-#
-#   3. Defines libvirt storage pools at the standard upstream paths
-#      under /var/lib/libvirt/ (a btrfs nodatacow subvol, see fstab):
-#        default   /var/lib/libvirt/images  (qemu:qemu, virt_image_t)
-#        isos      /var/lib/libvirt/isos    (root:root, virt_content_t)
-#      Both directories are pre-created by the virt sysext's tmpfiles
-#      drop-in; this script just registers them with libvirt.
-#      Stock SELinux policy labels the standard /var/lib/libvirt tree —
-#      no file_contexts aliases needed.
+# One-shot, idempotent host integration for the virt sysext. Run once
+# after `extension-enable virt`. Creates NM bridge br0 (VMs become LAN
+# peers), defines libvirt networks (default NAT + br0 bridge) and pools
+# (default /var/lib/libvirt/images, isos /var/lib/libvirt/isos — dirs
+# pre-created by the sysext's tmpfiles drop-in; stock SELinux policy
+# already labels the standard tree).
 
 set -euo pipefail
 

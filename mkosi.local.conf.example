@@ -8,12 +8,9 @@ Dependencies=desktop
 Dependencies=nvidia
 # Dependencies=mybox
 
-# ──────────────────────────────────────────────────────────────────
-# QEMU testing overrides — keep SecureBoot-free + serial-console
-# wiring so `just qemu` can boot the .raw under plain UEFI.
-# SELinux stays enforcing. NEVER ship to real hardware with these
-# overrides — they unwind the production boot trust chain.
-# ──────────────────────────────────────────────────────────────────
+# QEMU testing overrides — SecureBoot-free + serial console so `just
+# qemu` boots under plain UEFI. NEVER ship to real hardware with these:
+# they unwind the production boot trust chain.
 
 [Output]
 CompressOutput=no

@@ -1,24 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Generates signing material for myosi.
-#
-# Artifacts produced in keys/:
-#   boot.key  / boot.crt           RSA-4096 SHA-384. Signs sd-boot + UKI; enrolled
-#                                  in PK/KEK/db of the OVMF varstore below.
-#   image.key / image.crt          RSA-4096 SHA-384. Signs dm-verity root hash
-#                                  and sysext images; enrolled in db.
-#   OVMF_VARS-enrolled.fd          OVMF SecureBoot varstore with boot.crt
-#                                  (PK/KEK/db) + image.crt (db). Consumed by
-#                                  mkosi.local.conf FirmwareVariables= so qemu
-#                                  boots OVMF with SB enforcing against the
-#                                  local signing chain.
-#
-# All three derive from the local cert pair and regenerate together. Private
-# material is ignored by git; CI writes release signing material to the same paths.
+# Generates signing material in keys/: boot.key/.crt (signs sd-boot +
+# UKI, enrolled PK/KEK/db), image.key/.crt (signs dm-verity root hash +
+# sysexts, enrolled db), and OVMF_VARS-enrolled.fd (SecureBoot varstore
+# for qemu). All regenerate together; private material is git-ignored,
+# CI writes release material to the same paths.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Keys land in myosi/keys/ regardless of where this script lives.
 KEYS_DIR="$(cd "${SCRIPT_DIR}/../keys" && pwd)"
 
 cd "${KEYS_DIR}"
@@ -39,10 +28,8 @@ else
         -out boot.crt
 
     echo "Generating image.key (RSA-4096, SHA-384, 5y)..."
-    # Originally Ed25519, but dm-verity signature path in systemd-repart wraps
-    # the root hash in PKCS7/CMS which (in OpenSSL 3.x) refuses to sign with
-    # EdDSA keys: "error:1080007C:PKCS7 routines::pkcs7 add signature error".
-    # RSA-4096 works end-to-end (PKCS7 sign + kernel keyring verify).
+    # Not Ed25519: the dm-verity signature path wraps the root hash in
+    # PKCS7/CMS, and OpenSSL 3.x refuses to PKCS7-sign with EdDSA keys.
     openssl req -newkey rsa:4096 -keyform PEM -keyout image.key \
         -x509 -sha384 -days 1825 -nodes \
         -subj "/CN=myosi Image/O=myosi/" \
@@ -52,20 +39,16 @@ else
     chmod 644 boot.crt image.crt
 fi
 
-# OVMF varstore: stock template + boot.crt (PK/KEK/db) + image.crt (db).
-# Needed by Firmware=uefi-secure-boot in mkosi.local.conf so OVMF boots
-# enforcing with the local cert chain already trusted. The kernel loads its
-# .platform keyring from firmware db, so image.crt must be there too for
+# OVMF varstore: boot.crt (PK/KEK/db) + image.crt (db). The kernel
+# loads .platform from firmware db, so image.crt must be enrolled for
 # dm-verity roothash signature validation to pass.
 if [[ -f OVMF_VARS-enrolled.fd ]]; then
     echo "OVMF_VARS-enrolled.fd already present; delete to regenerate." >&2
 else
     OVMF_BASE=""
-    # Modern qemu q35+smm uses OVMF_CODE_4M.secboot.qcow2, which expects
-    # a 4M (540672-byte) varstore. The 2M (131072-byte) OVMF_VARS.fd
-    # mismatches and OVMF silently rejects the stored variables, leading
-    # to "No bootable option" failures. Prefer 4M variants; if only the
-    # qcow2 form is shipped, convert to raw .fd with qemu-img.
+    # OVMF_CODE_4M.secboot expects a 4M varstore; a 2M OVMF_VARS.fd is
+    # silently rejected → "No bootable option". Prefer 4M variants,
+    # converting qcow2 to raw if that's all that ships.
     for p in \
         /usr/share/edk2/ovmf/OVMF_VARS_4M.fd \
         /usr/share/OVMF/OVMF_VARS_4M.fd \
@@ -87,8 +70,7 @@ else
             fi
         done
     fi
-    # Last-resort fallback to the 2M variant for older distros that
-    # don't ship 4M. mkosi vm there will pair it with non-_4M OVMF_CODE.
+    # Last-resort 2M fallback for distros without 4M variants.
     if [[ -z "$OVMF_BASE" ]]; then
         for p in \
             /usr/share/edk2/ovmf/OVMF_VARS.fd \
@@ -111,15 +93,10 @@ else
         echo "Skipping OVMF varstore enrollment." >&2
     else
         echo "Generating OVMF_VARS-enrolled.fd from ${OVMF_BASE}..."
-        # virt-fw-vars CLI cannot combine file-based PK/KEK/db (--set-pk/
-        # --add-kek/--add-db) with Microsoft key enrollment in a single
-        # pass: add_microsoft_keys() only runs from the --enroll-{cert,
-        # redhat,generate,mgmt} branches, and --enroll-cert expects a
-        # distro/name alias (e.g. "redhat/redhat-2023"), not a file path.
-        # Drive the library directly so PK/KEK/db come from our local
-        # boot.crt + image.crt AND the Microsoft UEFI CA + KEK ship in
-        # db/KEK so Fedora's signed shim (the default ShimBootloader=
-        # signed bootloader in CI builds) validates against db.
+        # The virt-fw-vars CLI cannot combine file-based PK/KEK/db with
+        # Microsoft key enrollment in one pass; drive the library
+        # directly so our certs AND the Microsoft CA/KEK land in the
+        # varstore (needed for Fedora's signed shim to validate).
         /usr/bin/python3 - "${OVMF_BASE}" OVMF_VARS-enrolled.fd boot.crt image.crt <<'PY'
 import sys, uuid
 from virt.firmware.varstore import edk2

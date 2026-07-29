@@ -6,10 +6,8 @@ set -euo pipefail
 # key material source determines whether a build is local or release-signed.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Keys land at <repo>/keys/ — exactly ONE level up from this script's
-# dir. mkosi reads keys/ relative to the project root; a wrong level
-# aborts the build at cert validation ("Failed to load X.509
-# certificate"). mkdir before resolving so `cd` succeeds on first run.
+# Keys must land at <repo>/keys/ — mkosi reads keys/ relative to the
+# project root; a wrong level aborts the build at cert validation.
 DST="${SCRIPT_DIR}/../keys"
 mkdir -p "$DST"
 chmod 700 "$DST"

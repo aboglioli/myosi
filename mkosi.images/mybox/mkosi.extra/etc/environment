@@ -1,12 +1,6 @@
-# mybox PAM-visible environment.
-#
-# Read by pam_env on every login. The .nspawn file's [Environment]
-# only seeds PID 1 inside the container — PAM's session pass scrubs
-# the env before invoking user shells, so anything Wayland/Pulse
-# clients need has to live here (and/or /etc/profile.d/wayland.sh
-# for interactive shells).
-#
-# Values MUST match the ones in mybox.nspawn [Environment].
+# mybox PAM-visible env — the .nspawn [Environment] only seeds PID 1;
+# PAM scrubs before user shells, so Wayland/Pulse vars must live here.
+# Values MUST match mybox.nspawn [Environment].
 
 DISPLAY=:0
 WAYLAND_DISPLAY=/run/host/wayland-1

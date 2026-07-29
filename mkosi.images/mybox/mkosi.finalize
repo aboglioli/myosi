@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
-# mybox finalize.
-#
-# All work is shared with the main myosi image and lives in
-# mkosi.shared/finalize-common.sh — /etc → /usr/share/factory/etc snapshot + /etc
-# wipe + baseline-sysext bake (no current consumer). Single source of
-# truth; behaviour stays in lockstep with main.
+# mybox finalize — all work shared with main via
+# mkosi.shared/finalize-common.sh (/etc → factory snapshot + /etc wipe).
 
 set -euo pipefail
 

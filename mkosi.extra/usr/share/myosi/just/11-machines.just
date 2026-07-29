@@ -1,11 +1,7 @@
 # Enable, disable, and list machine DDI features (mybox today).
-#
-# Mirrors 10-extensions.just but targets /var/lib/machines/ instead of
-# /var/lib/extensions/, and skips the systemd-sysext refresh step.
-# Activation of an enabled machine is operator-driven via
-# `machinectl start <name>`; reapplying an existing machine usually
-# means `machinectl stop <name> && machinectl start <name>` since the
-# running namespace pins the old image file.
+# Mirrors 10-extensions.just but targets /var/lib/machines/ and skips the
+# sysext refresh — activation is operator-driven via machinectl stop/start,
+# since a running namespace pins the old image file.
 
 [group('machines')]
 machine-enable name version="":
@@ -42,9 +38,7 @@ machine-enable name version="":
         [ -n "$VERSION" ] || { echo "ERROR: failed to resolve release version" >&2; exit 5; }
     fi
 
-    # mybox-style artifacts embed the architecture in the filename
-    # (Output=%i_%v_%a in mkosi.images/<name>/mkosi.conf). Resolve to
-    # systemd's UPPER_ARCH token so the asset name matches the release.
+    # Asset name matches the build (Output=%i_%v_%a): <name>_<VER>_<ARCH>.raw.
     ARCH=$(uname -m | sed -e 's/^x86_64$/x86-64/' -e 's/^aarch64$/arm64/')
     ASSET="{{name}}_${VERSION}_${ARCH}.raw"
     TMPDIR=$(mktemp -d)
@@ -52,12 +46,9 @@ machine-enable name version="":
     echo "Downloading $ASSET from $REPO@$VERSION..."
     download_release_asset "$VERSION" "$ASSET" "$TMPDIR/$ASSET" "$REPO"
 
-    # Land the new DDI as /var/lib/machines/{{name}}_<VER>_<ARCH>.raw —
-    # the arch suffix matches sysupdate.machines.d/*.transfer's
-    # MatchPattern (mybox_@v_%a.raw). Versioned filename keeps prior
-    # installs around for rollback, InstancesMax=2 in the transfer
-    # enforces retention. Operators symlink {{name}}.raw → desired
-    # version when ready to flip.
+    # Versioned filename matches the transfer MatchPattern and keeps prior
+    # installs for rollback (InstancesMax=2 enforces retention). Operators
+    # symlink {{name}}.raw → desired version when ready to flip.
     install -d -m 0755 "$CACHE" /var/lib/machines
     install -m 0644 "$TMPDIR/$ASSET" "$CACHE/$ASSET"
     install -m 0644 "$TMPDIR/$ASSET" "/var/lib/machines/{{name}}_${VERSION}_${ARCH}.raw"
@@ -71,12 +62,9 @@ machine-enable name version="":
 
     feature_enable "{{name}}" sysupdate.machines.d
 
-    # NOT: refresh_sysext / machinectl restart. A running container
-    # keeps the old .raw open via a held fd — restarting silently
-    # would interrupt user sessions. Operator picks the moment:
-    #   sudo machinectl stop {{name}}
-    #   sudo ln -sf {{name}}_${VERSION}.raw /var/lib/machines/{{name}}.raw
-    #   sudo machinectl start {{name}}
+    # No auto-restart: a running container holds the old .raw open, and a
+    # silent restart would interrupt user sessions. The echo below shows the
+    # manual flip; the operator picks the moment.
     echo "Enabled machine '{{name}}' at version ${VERSION} (${ARCH})."
     echo "To activate:"
     echo "  sudo machinectl stop {{name}} 2>/dev/null || true"
@@ -94,8 +82,7 @@ machine-disable name:
 
     feature_disable "{{name}}" sysupdate.machines.d
 
-    # Stop the container first if it's running — otherwise rm fails on
-    # the held .raw on some kernels and the file silently leaks.
+    # Stop first — rm on a held .raw can fail on some kernels and silently leak.
     if machinectl show "{{name}}" >/dev/null 2>&1; then
         machinectl stop "{{name}}" 2>/dev/null || true
     fi

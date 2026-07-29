@@ -4,15 +4,10 @@ set -euo pipefail
 . "${SRCDIR}/mkosi.shared/sysext-build.sh"
 [ "${1:-final}" = "final" ] || exit 0
 
-# Unit activation is declarative: static `.wants/` symlinks shipped
-# under mkosi.profiles/containers/mkosi.extra/usr/lib/systemd/{system,user}/
-# sockets.target.wants/. Same single artifact covers both delivery
-# modes (profile baked into main image AND sysext-merged at runtime).
-# No imperative sysext_uphold_*/sysext_enable_*/systemctl calls here.
-
-# container-selinux is in base policy (see 10-packages-base.conf), so
-# container_runtime_exec_t and friends are already in policy.kern at boot.
-# Baked xattrs resolve directly at sysext merge — no runtime semodule -i.
+# Unit activation is declarative — static .wants/ symlinks in the
+# profile's mkosi.extra cover both baked and sysext delivery.
+# SELinux: container-selinux is in base policy; baked xattrs resolve at
+# sysext merge, no runtime semodule.
 
 sysext_write_extension_release containers
 

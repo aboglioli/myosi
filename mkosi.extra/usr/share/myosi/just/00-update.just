@@ -1,29 +1,9 @@
-# Update base image and enabled sysexts via cache-first sysupdate.
-#
-# All transfers read from /var/lib/sysupdate/ (populated by `fetch`).
-# `apply` installs cached artifacts via the systemd-sysupdate binary;
-# `update` does both. No live refresh by default — reboot is the
-# normal activation path.
-#
-# We invoke the binary directly (surfaced as the short `sysupdate`
-# symlink at /usr/local/bin/sysupdate, see mkosi.extra/) instead of
-# going through `updatectl`. Reason: systemd-sysupdated runs in a
-# tight SELinux context that silently denies the loop subsystem and
-# dosfs_t writes on Fedora 44 selinux-policy. The binary inherits
-# the calling shell's unconfined_t context and completes the same
-# transfers without sandbox interference.
-#
-# To flip back to updatectl in the future (when policy ships
-# systemd_sysupdate_t rules or we add a CIL module):
-#   1. Set MYOSI_SYSUPDATE_BIN=updatectl in /etc/environment or in
-#      sysupdate_env() (myosi/lib.sh).
-#   2. Rewrite the call sites below: updatectl uses
-#        verb target[@VERSION]
-#      while systemd-sysupdate uses
-#        --component=NAME verb [VERSION]
-# Both engines read the same /usr/lib/sysupdate.d/*.transfer files
-# and the same /var/lib/sysupdate cache, so artifacts and ordering
-# stay identical.
+# Update base image and enabled sysexts via cache-first sysupdate:
+# `fetch` populates /var/lib/sysupdate/, `apply` installs from cache,
+# `update` does both. No live refresh by default — reboot activates.
+# Calls the systemd-sysupdate binary directly (the `sysupdate` symlink),
+# not updatectl: systemd-sysupdated's F44 SELinux sandbox silently denies
+# loop devices and dosfs_t /efi writes (details in lib.sh sysupdate_env).
 
 # ------- fetch -----------------------------------------------------
 
@@ -60,12 +40,8 @@ fetch version="":
     VERSION=$(resolve_version "{{version}}" "$REPO")
     [ -n "$VERSION" ] || { echo "ERROR: failed to resolve release version" >&2; exit 3; }
 
-    # Architecture token matches mkosi's %a specifier (and systemd's
-    # specifier engine in sysupdate transfer MatchPattern=). The release
-    # pipeline bakes %a into every artifact name (Output=%i_%v_%a on
-    # every sub-image plus UnifiedKernelImageFormat=%i_%v_%a for the
-    # UKI), so every download below filters to the host's native arch
-    # without grabbing the wrong build.
+    # ARCH matches mkosi's %a token — baked into every artifact name
+    # (Output=%i_%v_%a) — so downloads filter to the host's native arch.
     ARCH=$(uname -m | sed -e 's/^x86_64$/x86-64/' -e 's/^aarch64$/arm64/')
 
     install -d -m 0755 "$CACHE"
@@ -79,13 +55,9 @@ fetch version="":
         install -m 0644 "$TMPDIR/$a" "$CACHE/$a"
     }
 
-    # root + verity ship with the PartitionUUID embedded in the
-    # filename: myosi_<VER>_<ARCH>_<UUID>.root.raw.zst (first 16 bytes
-    # of roothash) and myosi_<VER>_<ARCH>_<UUID>.verity.raw.zst (last
-    # 16 bytes). The .transfer files capture the UUID via the `@u`
-    # wildcard and write it into the GPT entry. gh CLI's --pattern
-    # accepts globs, so we fetch with a wildcard for the UUID slot
-    # and let sysupdate match by content.
+    # root + verity filenames embed a roothash-derived PartitionUUID,
+    # captured by the .transfer @u wildcard — fetch with a glob for the
+    # UUID slot and let sysupdate match by content.
     download_glob() {
         local v="$1" pattern="$2"
         echo "Downloading $pattern from $REPO@$v..."
@@ -96,7 +68,6 @@ fetch version="":
     download_glob "$VERSION" "myosi_${VERSION}_${ARCH}_*.verity.raw.zst"
     download_glob "$VERSION" "myosi_${VERSION}_${ARCH}.verity-sig.raw.zst"
     download_glob "$VERSION" "myosi_${VERSION}_${ARCH}.efi"
-    # Install every downloaded host artifact into the cache.
     for f in "$TMPDIR"/myosi_"${VERSION}"_"${ARCH}"_*.root.raw.zst \
              "$TMPDIR"/myosi_"${VERSION}"_"${ARCH}"_*.verity.raw.zst \
              "$TMPDIR"/myosi_"${VERSION}"_"${ARCH}".verity-sig.raw.zst \
@@ -105,9 +76,7 @@ fetch version="":
         install -m 0644 "$f" "$CACHE/$(basename "$f")"
     done
 
-    # Sysexts ship as <feature>_<VER>_<ARCH>.raw (Output=%i_%v_%a on
-    # every sysext sub-image). Filter to the host arch so we don't
-    # pull an arm64 build on an x86-64 host or vice versa.
+    # Sysexts ship as <feature>_<VER>_<ARCH>.raw; enabled features only.
     for feature in $(find "$EXT_DIR" -maxdepth 1 -name '*.feature' -printf '%f\n' 2>/dev/null | sed 's/\.feature$//' | sort -u); do
         if feature_is_enabled "$feature" "$EXT_DIR" "$ETC_EXT_DIR"; then
             download "$VERSION" "${feature}_${VERSION}_${ARCH}.raw"
@@ -140,11 +109,8 @@ apply version="" refresh="":
 
     command -v "$SYSUPDATE" >/dev/null || { echo "ERROR: $SYSUPDATE is required" >&2; exit 4; }
 
-    # Preflight: validate cache when a specific version was requested.
-    # root + verity ship as myosi_<VER>_<ARCH>_<UUID>.{root,verity}.raw.zst
-    # — the UUID is computed from the verity roothash and the .transfer
-    # files capture it via the @u wildcard. Match by glob; pin the
-    # architecture to the host so we don't accept a wrong-arch cache.
+    # Preflight cache check when a version is pinned: root/verity match by
+    # UUID glob (roothash-derived), arch pinned to the host.
     ARCH=$(uname -m | sed -e 's/^x86_64$/x86-64/' -e 's/^aarch64$/arm64/')
     if [ -n "$VERSION" ]; then
         missing=()

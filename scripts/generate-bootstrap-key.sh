@@ -1,40 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Stage the LUKS bootstrap key at keys/data.key. From there:
-#   - mkosi.postinst installs it into the main image at
-#     /usr/share/myosi/keys/data.key and onto the ESP at
-#     /efi/keys/data.key.
-#   - mkosi.images/initrd/mkosi.conf ExtraTrees= pulls
-#     it into the initrd cpio at /usr/share/myosi/keys/data.key.
-# Same lifecycle as keys/{boot,image}.{key,crt}: persistent across
-# builds, sourced from a GitHub Actions secret in CI, regenerated only
-# if neither secret nor persistent copy exists.
-#
-# Source resolution:
-#
-#   1. If $MYOSI_DATA_KEY is set in the environment, base64-decode it.
-#      This is the CI path — store the raw 32 bytes base64-encoded as
-#      a GitHub Actions secret named MYOSI_DATA_KEY.
-#   2. Otherwise, if keys/data.key exists, reuse it. Local-dev path.
-#   3. Otherwise, generate a fresh random 32-byte key. First local
-#      build only.
-#
-# Why stable across releases (not random per build): every UKI ships
-# with the bootstrap key inside its .initrd cpio. If the key value
-# changed per build, sysupdate would replace UKI_v1 with UKI_v2,
-# leaving LUKS slot 0 bound to key_v1 while the new initrd's
-# /usr/share/myosi/keys/data.key now contains key_v2. cryptsetup
-# would fail to unlock, fall through to TPM2 / passphrase, and the
-# operator would be locked out of their data — unless they had run
-# `myosi data-finalize` (enrolled real auth + wiped slot 0) before
-# updating. Stable key removes that footgun.
-#
-# Leak severity: if the key value escapes (CI artifact published,
-# secret rotated incorrectly, repo private key committed), every
-# install of every version that hasn't yet wiped slot 0 is
-# compromised. Treat MYOSI_DATA_KEY with the same care as the signing
-# keys (MYOSI_BOOT_KEY, MYOSI_IMAGE_KEY).
+# Stage the LUKS bootstrap key at keys/data.key (mkosi.postinst ships
+# it in-image + on the ESP; the initrd pulls it via ExtraTrees=).
+# Resolution: $MYOSI_DATA_KEY (CI secret, base64 of 32 raw bytes) →
+# existing keys/data.key → fresh `openssl rand 32`.
+# Must stay STABLE across releases: a per-build key would leave LUKS
+# slot 0 bound to the old key after a sysupdate UKI swap — data lockout
+# unless the operator already ran `myosi data-finalize`. Treat leaks
+# like signing-key leaks: every install with slot 0 intact is exposed.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"

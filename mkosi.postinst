@@ -1,45 +1,9 @@
 #!/usr/bin/env bash
-# Main myosi image postinst.
-#
-# Most of the per-image setup is shared with sub-image builds (mybox)
-# and lives in mkosi.shared/postinst-common.sh — preset-all, SELinux
-# /usr/share/factory/etc subs, /root|/mnt → var/* symlinks, /srv mountpoint,
-# version metadata stash.
-#
-# This wrapper sources that common helper and adds the main-image-only
-# steps that can't run inside a nspawn-target DDI:
-#   §7   MOK signing certs into /usr/share/myosi/keys/ + /efi/keys/
-#   §7b  LUKS bootstrap data.key into the same paths
-#
-# Background notes for the main image (deferred / informational only,
-# no executable steps):
-#
-#   §1  Users + groups + passwords are fully declarative — interactive
-#       users via systemd-homed credentials at /etc/credstore/
-#       home.create.<name>; groups declared in
-#       /usr/lib/sysusers.d/myosi-groups.conf; root locked in
-#       /etc/shadow, unlocked via `sudo passwd root` after first SSH
-#       publickey login via the fleet authorized_keys file at
-#       /usr/share/myosi/ssh/authorized_keys.d/<user> (baked into
-#       the base image's mkosi.extra/, no longer shipped as a sysext).
-#
-#   §4  Firewalld base config ships statically via mkosi.extra/ instead
-#       of running firewall-offline-cmd (which requires real root).
-#
-#   §9e Confext is NOT masked, NOT preset-enabled by default — myosi's
-#       /etc is exactly ONE overlay today; operator who wants confext
-#       can `systemctl enable --now systemd-confext.service` later.
-#
-#   §9f systemd-gpt-auto-generator left UNMASKED — runs successfully
-#       on real hardware and remains the normal post-switch DPS path.
-#
-#   §10 Baseline sysext bakes → /usr/share/myosi/extensions/ live in
-#       mkosi.finalize (must run AFTER the /etc snapshot). No current
-#       consumer — fleet-keys moved to base mkosi.extra; kept around
-#       for future baselines.
-#
-#   §11 no dotfiles repo is baked into the image — clone your own
-#       post-login; $HOME is the supported path.
+# Main myosi image postinst. Shared baseline (preset-all, SELinux
+# factory-/etc subs, /root|/mnt symlinks, /srv mountpoint, version
+# metadata) lives in mkosi.shared/postinst-common.sh; this wrapper
+# adds the main-image-only steps: MOK signing certs and the LUKS
+# bootstrap data.key into /usr/share/myosi/keys/ + /efi/keys/.
 
 set -euo pipefail
 
@@ -48,31 +12,13 @@ STAGE="${1:-final}"
 
 SRCDIR="${SRCDIR:-$(dirname "$(realpath "${BASH_SOURCE[0]}")")}"
 
-# Shared baseline (preset-all, SELinux subs, /root|/mnt symlinks,
-# /srv mountpoint, version metadata).
 source "${SRCDIR}/mkosi.shared/postinst-common.sh"
 
-# §7. Ship public signing certificates for MOK enrollment. Private keys
-#     stay in keys/ and never reach the image. Ship both PEM (.crt)
-#     for openssl / human consumption and DER (.der) because
-#     `mokutil --import` rejects PEM with "not a valid x509 certificate
-#     in DER format".
-#
-#     Two destinations:
-#       /usr/share/myosi/keys/   inside the verity-protected root for
-#                                runtime operator workflows (mokutil
-#                                --import, openssl inspection). Path
-#                                documented in keys/README.md.
-#       /efi/keys/               on the ESP (vfat) so UEFI firmware's
-#                                built-in file browser can read them
-#                                directly during db / KEK / PK
-#                                enrollment. The verity-protected root
-#                                is erofs which firmware can't read —
-#                                without the ESP copy you'd need a USB
-#                                stick to ferry the .der files into BIOS
-#                                setup. mkosi.repart.runtime/00-esp.conf
-#                                CopyFiles=/efi:/ lands anything under
-#                                $BUILDROOT/efi on the partition.
+# Ship public signing certs for MOK enrollment (private keys never
+# reach the image). Both PEM and DER — `mokutil --import` rejects PEM.
+# Two destinations: /usr/share/myosi/keys/ for runtime operator use,
+# and /efi/keys/ on the ESP so UEFI firmware's file browser can read
+# them during db/KEK/PK enrollment (firmware can't read erofs).
 mkdir -p "$BUILDROOT/usr/share/myosi/keys" "$BUILDROOT/efi/keys"
 for cert in boot image; do
     src="$SRCDIR/keys/${cert}.crt"
@@ -86,17 +32,10 @@ for cert in boot image; do
     fi
 done
 
-# §7b. Bootstrap LUKS key. Same staging as the signing certs but
-#      handled separately because:
-#        - Raw 32-byte key, not an X.509 cert (no PEM/DER conversion).
-#        - PRIVATE material — mode 0600, not 0644.
-#        - The key systemd-repart formats LUKS slot 0 with at first
-#          boot, and what systemd-cryptsetup reads via /etc/crypttab on
-#          every subsequent boot, until the operator wipes slot 0.
-#      Sourced from $SRCDIR/keys/data.key which
-#      scripts/generate-bootstrap-key.sh writes (env MYOSI_DATA_KEY in
-#      CI, cached file for local dev, fresh `openssl rand 32` as
-#      fallback).
+# Bootstrap LUKS key: raw 32-byte PRIVATE material (mode 0600, no
+# PEM/DER conversion). repart formats LUKS slot 0 with it at first boot
+# and crypttab reads it every boot until the operator wipes slot 0.
+# Written by scripts/generate-bootstrap-key.sh.
 DATA_KEY_SRC="$SRCDIR/keys/data.key"
 if [ -f "$DATA_KEY_SRC" ]; then
     install -m 0600 "$DATA_KEY_SRC" "$BUILDROOT/usr/share/myosi/keys/data.key"

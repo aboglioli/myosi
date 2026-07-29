@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Main myosi image finalize.
-#
-# All work is shared with sub-image builds (mybox) and lives in
-# mkosi.shared/finalize-common.sh — /etc → /usr/share/factory/etc snapshot + /etc
-# wipe + baseline-sysext bake (no current consumer).
+# Main myosi image finalize. All work is shared with sub-image builds
+# and lives in mkosi.shared/finalize-common.sh (/etc → factory snapshot
+# + /etc wipe + baseline-sysext bake).
 
 set -euo pipefail
 

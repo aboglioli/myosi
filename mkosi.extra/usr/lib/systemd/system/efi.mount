@@ -2,26 +2,12 @@
 Description=/efi (EFI System Partition)
 Documentation=https://github.com/aboglioli/myosi/blob/main/README.md
 DefaultDependencies=no
-# Same shape as var.mount / home.mount / srv.mount: bind to the
-# backing device, mount before local-fs.target, tear down cleanly if
-# the device disappears. The ESP is on the boot disk; the GPT label
-# `esp` (set by repart's 00-esp.conf) gives a stable handle that
-# survives sd-card / nvme renumbering.
-#
-# Shadows systemd-gpt-auto-generator's emitted efi.mount when/if the
-# generator succeeds. gpt-auto currently fails entirely on verity-
-# protected myosi installs (the cmdline image_policy=:=ignore
-# fallback excludes ESP from discovery, and the generator's
-# root/usr-hash lookup additionally fails on systemd 259), so this
-# explicit unit is what actually mounts /efi every boot.
-#
-# Without /efi mounted:
-#   * bootctl status / install / update fail (no ESP to read/write).
-#   * systemd-boot-random-seed.service can't write
-#     /efi/loader/random-seed → boot-time entropy degraded.
-#   * sysupdate UKI transfer fails with "Read-only file system"
-#     because the transfer target Path=/efi/EFI/Linux resolves
-#     against the verity-baked stub /efi directory on the rootfs.
+# Same shape as var/home/srv.mount: bind to the backing device (stable
+# GPT label `esp` from repart 00-esp.conf), mount before local-fs.target.
+# gpt-auto fails entirely on verity-protected installs (systemd 259), so
+# this explicit unit is what actually mounts /efi — without it bootctl,
+# boot-random-seed, and the sysupdate UKI transfer (which would hit the
+# read-only rootfs stub /efi) all fail.
 Conflicts=umount.target
 Before=local-fs.target umount.target
 After=dev-disk-by\x2dpartlabel-esp.device blockdev@dev-disk-by\x2dpartlabel-esp.target
@@ -32,10 +18,6 @@ What=/dev/disk/by-partlabel/esp
 Where=/efi
 Type=vfat
 # umask=0077: only root reads the ESP (boot secrets, random seed).
-# shortname=winnt: FAT short-name convention. Matches Fedora default.
-# discard: ESP is on the same NVMe as everything else; benefits from
-#          trim. fstrim.timer trims it automatically.
-# noatime: ESP filesystem doesn't need access-time tracking.
 Options=defaults,umask=0077,shortname=winnt,discard,noatime
 
 [Install]

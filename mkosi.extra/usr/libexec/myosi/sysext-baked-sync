@@ -1,57 +1,21 @@
 #!/usr/bin/env bash
-# Sync verity-baked sysexts from /usr/share/myosi/extensions/ into the
-# /var/lib/extensions/ discovery path that systemd-sysext scans.
-#
-# Why this script exists:
-#   systemd-sysext only discovers raws from /etc/extensions/,
-#   /run/extensions/, and /var/lib/extensions/ (per systemd-sysext(8)).
-#   /usr/lib/extensions/ and /usr/share/... are NOT in the discovery
-#   path. Empirically verified on F44 systemd 259:
-#       mv /var/lib/extensions/fleet-keys.raw /tmp/
-#       systemd-sysext refresh    # fleet-keys NOT merged, despite
-#                                  # /usr/lib/extensions/fleet-keys.raw
-#                                  # being present.
-#
-# But /var/lib/extensions/ is on the mutable data partition — we cannot
-# bake raws there from the verity-immutable image. Solution: ship the
-# baseline raws under /usr/share/myosi/extensions/ (verity-erofs, atomic
-# swap on bootc upgrade) and symlink them into /var/lib/extensions/ at
-# boot. Symlinks themselves live on /var (mutable) but their targets
-# are verity-immutable, so image upgrade atomically rotates the content.
-#
-# Stale cleanup:
-#   Each image upgrade ships a different VERSION of every baked sysext
-#   (the filename embeds IMAGE_VERSION). Old symlinks would otherwise
-#   accumulate at /var/lib/extensions/<name>_<OLD_VER>.raw, sysext
-#   would merge BOTH versions simultaneously (no auto-version selection
-#   on the sysext side — that's sysupdate's job). Solution: remove any
-#   /var/lib/extensions/<name>_*.raw entries whose <name> matches a
-#   baked sysext but whose full filename differs from the current bake.
-#
-# Operator overrides:
-#   Operators may drop sysupdate-fetched raws directly into
-#   /var/lib/extensions/<name>_<NEW_VER>.raw — those land as regular
-#   files (not symlinks) and supersede the baseline by version order.
-#   This script only manages SYMLINKS pointing at /usr/share/myosi/
-#   extensions/ — regular files in /var/lib/extensions/ are left alone.
-#
-# Idempotent: safe to invoke from systemd-sysext.service's ExecStartPre
-# on every boot and on every `systemd-sysext refresh`.
+# Symlink verity-baked sysexts from /usr/share/myosi/extensions/ into
+# /var/lib/extensions/ — systemd-sysext only scans /etc, /run and /var/lib
+# extensions dirs (verified on F44 systemd 259), and /var/lib is mutable so
+# raws can't be baked there; symlink targets stay verity-immutable so image
+# upgrade rotates content atomically. Manages SYMLINKS only — operator-dropped
+# regular files are never touched. Idempotent (sysext ExecStartPre, every boot).
 
 set -euo pipefail
 
 SRC_DIR=/usr/share/myosi/extensions
 TGT_DIR=/var/lib/extensions
 
-# No baseline directory shipped → nothing to do (e.g. on hosts with
-# zero baked sysexts).
 [ -d "$SRC_DIR" ] || exit 0
 
 mkdir -p "$TGT_DIR"
 
-# Strip "_VERSION.raw" suffix to get the sysext NAME for cleanup
-# matching. Last "_"-separated component is the version per myosi's
-# naming convention (fleet-keys_2026.06.15.10.raw → fleet-keys).
+# <name>_<VERSION>.raw → <name> (version is the last "_" component).
 extract_name() {
     local fn=${1##*/}
     fn=${fn%.raw}
@@ -67,26 +31,17 @@ for src in "$SRC_DIR"/*.raw; do
     baked[$name]=$(basename "$src")
 done
 
-# Remove stale SYMLINKS only. Two cases:
-#   (a) Symlink whose name matches a baked sysext but whose filename
-#       differs from the current bake — the .07 -> .12 image-upgrade
-#       leftover.
-#   (b) Dangling symlink whose target is under $SRC_DIR but no longer
-#       exists — happens if we stop baking a sysext name we previously
-#       baked.
-#
-# Regular files in $TGT_DIR are NEVER deleted. Operators may drop
-# sysupdate-fetched raws there as real files; those are the operator's
-# source of truth and may legitimately have a higher version than the
-# baked baseline.
+# Remove stale SYMLINKS only: (a) name matches the current bake but version
+# differs — sysext would merge BOTH versions (it does no version selection);
+# (b) dangling link into $SRC_DIR (name no longer baked). Regular files are
+# operator overrides and are NEVER deleted.
 for tgt in "$TGT_DIR"/*.raw; do
     [ -L "$tgt" ] || continue
     fn=$(basename "$tgt")
     name=$(extract_name "$tgt")
     link_target=$(readlink "$tgt")
 
-    # Only manage symlinks that point into $SRC_DIR. Operator-created
-    # symlinks pointing elsewhere are left alone.
+    # Only manage symlinks pointing into $SRC_DIR.
     case "$link_target" in
         "$SRC_DIR"/*) ;;
         *) continue ;;
@@ -106,8 +61,7 @@ for tgt in "$TGT_DIR"/*.raw; do
     fi
 done
 
-# Symlink current baked raws into the discovery path. Only manages
-# symlinks — never overwrites a regular file (operator override).
+# Link current bakes into the discovery path; never overwrite a regular file.
 for name in "${!baked[@]}"; do
     fn=${baked[$name]}
     src="$SRC_DIR/$fn"

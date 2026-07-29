@@ -1,31 +1,10 @@
 #!/usr/bin/env bash
-# Attach the myosi data-luks pool to the booting host.
-#
-# Single responsibility: bring up the encrypted btrfs pool's device-
-# mapper state so subsequent mount units (sysroot-etc.mount in the
-# initrd; var.mount / home.mount / srv.mount post-pivot) have a live
-# /dev/mapper/data to bind to. Anything beyond device unlock + btrfs
-# scan belongs in its own unit (see myosi-etc-seed.service for the
-# first-boot /etc seed + label).
-#
-# Steps:
-#   1. Find the GPT Type=var partition on the SAME disk as the booted
-#      root (guard rail: refuses to unlock a data-luks partition on a
-#      different disk, which prevents an external USB myosi installer's
-#      data-luks from getting auto-adopted into the running host).
-#   2. LUKS-unlock that partition as /dev/mapper/data via the bootstrap
-#      key file, with TPM2/passphrase fallback.
-#   3. Discover and LUKS-unlock any additional data-N labeled LUKS
-#      partitions on ANY disk in the system. These are operator-
-#      configured multi-disk btrfs pool members (e.g. a host's secondary
-#      LUKS disk) — discovery across disks is intentional.
-#   4. `btrfs device scan` so the kernel knows about all members of the
-#      multi-device btrfs.
-#
-# This script ran as `sysroot-prep` until the /etc-subvol refactor.
-# Renamed because it no longer prepares /sysroot — it attaches the
-# data pool. Mount logic, overlay setup, SELinux pre-seeding, and the
-# first-boot /etc seed all moved out into separate units.
+# Attach the myosi data-luks pool in the initrd so later mount units have a
+# live /dev/mapper/data: unlock the Type=var partition on the SAME disk as
+# the booted root (guard: an external myosi USB's data-luks must not be
+# adopted), unlock data-N pool members on ANY disk (multi-disk btrfs is
+# intentional), then `btrfs device scan`. Mounts, /etc seed and SELinux
+# labeling live in separate units.
 
 set -euo pipefail
 
@@ -40,18 +19,10 @@ die() {
 }
 
 udev_partition_property() {
-    # Read ID_PART_ENTRY_* properties from udev's per-device DB.
-    # Why not `blkid -s PART_ENTRY_*`: blkid in the initrd silently
-    # returns empty (exit 2, stderr swallowed) on dm-verity-backed
-    # partitions — it tries to probe the FS layer and aborts before
-    # reporting partition-table metadata. udev gathers ID_PART_ENTRY_*
-    # at coldplug time from the parent disk's partition table, so the
-    # values are always populated as long as udevadm settle ran first.
-    #
-    # Pure-bash parsing: mkosi-initrd ships no awk / grep / cut, so the
-    # KEY=VALUE split uses `read` against a here-string of the property
-    # dump (bash 4+ supports both IFS='=' read split and the `<<<` form
-    # with -u set).
+    # udev DB, not blkid: initrd blkid silently returns empty on
+    # dm-verity-backed partitions (probes the FS layer and aborts before
+    # partition metadata); udev has ID_PART_ENTRY_* from coldplug as long as
+    # udevadm settle ran. Pure-bash parse: mkosi-initrd ships no awk/grep/cut.
     local out k v
     out=$(udevadm info --query=property --name="$1" 2>/dev/null) || return 0
     while IFS='=' read -r k v; do
@@ -126,10 +97,8 @@ parent_disk() {
 }
 
 var_partition_on_disk() {
-    # Guard rail: the primary data partition MUST be on the same disk
-    # as the booted root. Without this guard, plugging in an external
-    # USB myosi installer with its own data-luks would have its
-    # partition unlocked into the running host's /dev/mapper/data.
+    # Guard rail: primary data partition MUST be on the boot disk — otherwise
+    # an external myosi USB's data-luks would unlock into /dev/mapper/data.
     local disk="$1"
     local disk_node disk_sys found= part_sys candidate type
 
@@ -177,12 +146,8 @@ unlock_primary_data() {
 }
 
 unlock_pool_members() {
-    # Pool members are discovered ACROSS the system (not constrained to
-    # the root disk like the primary data partition is). This matches
-    # operator-configured multi-disk btrfs pools: a host may use a secondary
-    # LUKS disk as a data-N pool member. Discovery across disks here is
-    # intentional — operators who plug in a data-N labeled LUKS
-    # partition want it adopted.
+    # Pool members are discovered across ALL disks on purpose — an
+    # operator-added data-N labeled LUKS partition should be adopted.
     local dev label primary="$1"
 
     while IFS= read -r dev; do
@@ -209,9 +174,6 @@ udevadm settle
 unlock_pool_members "$var_part"
 udevadm settle
 
-# Tell the kernel about every member of the multi-device btrfs before
-# sysroot-etc.mount and the post-pivot var.mount / home.mount /
-# srv.mount fire. Without `btrfs device scan`, the first mount sees
-# only the primary device and rejects subvol mounts that span pool
-# members.
+# Without `btrfs device scan`, the first mount sees only the primary device
+# and rejects subvol mounts that span pool members.
 btrfs device scan /dev/mapper/data /dev/mapper/data-* 2>/dev/null || true

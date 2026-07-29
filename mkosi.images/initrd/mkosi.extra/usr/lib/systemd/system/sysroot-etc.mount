@@ -2,11 +2,8 @@
 Description=/sysroot/etc btrfs subvolume on data-luks
 Documentation=https://github.com/aboglioli/myosi/blob/main/README.md
 DefaultDependencies=no
-# See myosi-data-attach.service for the full dependency rationale
-# (IgnoreOnIsolate=yes, Wants=-not-Requires= upstream,
-# OnFailure=emergency.target, Before=initrd.target, static .wants/
-# symlinks in initrd.target.wants/ AND initrd-switch-root.target.wants/).
-# Same rules apply to every unit in the /etc chain.
+# Dependency rationale: see myosi-data-attach.service — same rules for
+# every unit in the /etc chain.
 IgnoreOnIsolate=yes
 OnFailure=emergency.target
 After=myosi-data-attach.service
@@ -14,24 +11,10 @@ Wants=myosi-data-attach.service
 Before=myosi-etc-seed.service initrd.target initrd-switch-root.target
 
 [Mount]
-# /etc was an overlayfs (lowerdir=/sysroot/usr/share/factory/etc + upperdir on
-# /sysroot/var/etc) prior to the etc-subvol refactor. The overlay made
-# /etc depend on /var, pinned /dev/mapper/data through the entire
-# shutdown sequence, created an SELinux upperdir-context caching race
-# on first boot, and required a setfattr pass in the initrd to
-# pre-seed etc_t on the upperdir. All of that goes away when /etc
-# lives as its own btrfs subvolume on the same encrypted data-luks
-# pool.
-#
-# First-boot seeding of the (empty) subvolume from /sysroot/usr/share/factory/etc
-# happens in myosi-etc-seed.service (After= this mount, Before= pivot)
-# because PID 1 reads /etc/selinux/config + /etc/systemd/system.conf
-# synchronously at startup. Mount-then-seed in two units keeps each
-# job small and named for what it does.
-#
-# A failed mount here (e.g. /etc subvol missing on an upgrade host
-# that skipped the README runbook) propagates to emergency.target via
-# OnFailure= and drops to the initrd emergency shell.
+# /etc is a real btrfs subvolume, not an overlay. First-boot seeding from
+# /usr/share/factory/etc happens in myosi-etc-seed.service (must finish
+# pre-pivot: PID 1 reads /etc/selinux/config synchronously at startup).
+# A failed mount drops to the initrd emergency shell via OnFailure=.
 What=/dev/mapper/data
 Where=/sysroot/etc
 Type=btrfs

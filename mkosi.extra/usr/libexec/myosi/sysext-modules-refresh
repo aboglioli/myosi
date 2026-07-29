@@ -1,27 +1,10 @@
 #!/usr/bin/env bash
-# Stack a tmpfs overlay on /usr/lib/modules/<KVER>/ and run depmod so
-# the effective modules.{dep,alias,symbols,...} index files include
-# every merged sysext's /usr/lib/modules/<KVER>/extra/<sysext>/ tree.
-#
-# Why this is necessary: mkosi v26's sysext sealer strips any path
-# from the sysext overlay that also exists in the base-tree, REGARDLESS
-# of content. The base-tree (Fedora's kernel-modules-core) ships
-# /usr/lib/modules/<KVER>/modules.{dep,alias,symbols,...}; our kmod
-# sysexts (nvidia, nvidia-580xx, zfs) regenerate these to add
-# extra/<kmod>/ entries — and mkosi unlinks them at seal time. Without
-# this service running on the host post-merge, `modprobe nvidia`
-# fails with `Module nvidia not found in directory /lib/modules/<KVER>`
-# even though nvidia.ko.xz is physically present in the merged overlay.
-#
-# We cannot just `depmod -a` directly: /usr is verity-readonly and
-# the sysext overlay above it is also mounted ro. Instead we stack
-# ANOTHER overlay specifically on /usr/lib/modules/<KVER>/ with a
-# tmpfs upper. depmod writes its output to that upper; modprobe reads
-# from the merged view, sees the new modules.dep, resolves nvidia.
-#
-# Idempotent: re-mounts cleanly on every call (unmount then mount).
-# Cheap: no copy, just an overlay; depmod walks the merged tree in
-# place and writes ~5 MiB of indices to tmpfs.
+# Stack a tmpfs-upper overlay on /usr/lib/modules/<KVER>/ and run depmod so
+# module indices include merged sysexts' extra/<sysext>/ modules.
+# Needed because mkosi v26's sysext sealer strips any path that also exists
+# in the base tree regardless of content — the regenerated modules.dep etc.
+# get unlinked at seal time, so `modprobe nvidia` fails despite the .ko being
+# present. depmod can't write in place: /usr and the sysext overlay are ro.
 
 set -euo pipefail
 
@@ -41,9 +24,7 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Tear down any existing overlay on $MODDIR before re-stacking. mount
-# allows re-mounting the same target, but a fresh upperdir keeps the
-# state consistent with the current set of merged sysexts.
+# Re-stack with a fresh upper so state matches the current merged sysext set.
 if mountpoint -q "$MODDIR"; then
     umount "$MODDIR" || {
         echo "WARN: existing overlay on $MODDIR busy; depmod refresh may use stale upper" >&2
@@ -52,51 +33,26 @@ fi
 
 mkdir -p "$UPPER" "$WORK"
 
-# overlayfs requires lowerdir, upperdir, and workdir to be on the same
-# OR cooperating filesystems. /usr is already an overlay (sysext over
-# verity-erofs); stacking another overlay on top of a subdirectory of
-# /usr is supported by overlayfs and works as expected on F44+.
+# Stacking an overlay on a subdir of the existing /usr overlay works on F44+.
 mount -t overlay overlay \
     -o "lowerdir=${MODDIR},upperdir=${UPPER},workdir=${WORK}" \
     "$MODDIR"
 
-# If depmod fails, the overlay is up but the upper is empty — modprobe
-# would then see an empty modules.dep (overlay shadows the base) and
-# break for EVERY module on the system, not just nvidia. Unmount on
-# any failure so modprobe falls back to the verity-resident indices.
+# If depmod fails, the empty upper would shadow modules.dep and break
+# modprobe for EVERY module — unmount on failure so the verity-resident
+# indices stay visible.
 trap 'umount "$MODDIR" 2>/dev/null || true' ERR
 
-# Walk the merged modules tree and regenerate every index file.
-# Outputs land in $UPPER and shadow the verity-resident versions at
-# the same path via the overlay.
 depmod -a "$KVER"
 
 trap - ERR
 echo "Refreshed depmod indices for ${KVER} (overlay upper at ${UPPER})"
 
-# Load every kmod listed in modules-load.d AT THIS POINT, before any
-# separate systemd-modules-load call.
-#
-# Why we cannot defer to systemd-modules-load.service:
-#   When ExecStartPost runs `sysext-modules-refresh` followed by
-#   `systemd-modules-load`, the modules-load process has been observed
-#   to fire a libkmod scan against a stale modules.dep view — even
-#   though depmod completed milliseconds earlier and the overlay is up.
-#   Empirical journal observation on real hardware (.12 boot):
-#       sysext-modules-refresh: Refreshed depmod indices...
-#       systemd-modules-load: Failed to find module 'nvidia'
-#       systemd-modules-load: Failed to find module 'nvidia_modeset'
-#       systemd-modules-load: Failed to find module 'nvidia_drm'
-#   followed immediately by working `modprobe -n -v nvidia_drm` at
-#   the shell. The new process race-loses against tmpfs overlay
-#   dentry-cache invalidation in libkmod's initial scan.
-#
-# Bypass: run modprobe HERE, in the same process that just finished
-# depmod. The kernel has just-written cache state, modprobe spawns a
-# fresh libkmod context after depmod's write completed.
-# Replicate systemd-modules-load's priority lookup: /etc/ > /run/ >
-# /usr/lib/, last file wins per basename. Build a deduplicated list of
-# config files, then walk each once.
+# Load modules-load.d modules HERE, not via systemd-modules-load: a fresh
+# systemd-modules-load run right after this script race-loses against overlay
+# dentry-cache invalidation and reports "Failed to find module 'nvidia'"
+# (observed in journal) even though modprobe works immediately afterwards.
+# Replicate its precedence: /etc > /run > /usr/lib, last file per basename wins.
 declare -A modload_cfgs
 for dir in /usr/lib/modules-load.d /run/modules-load.d /etc/modules-load.d; do
     [ -d "$dir" ] || continue
@@ -108,9 +64,7 @@ done
 
 for cfg in "${modload_cfgs[@]}"; do
     while IFS= read -r raw; do
-        # Strip inline comments (# or ;), then take the first
-        # whitespace-separated token. `read` handles leading/trailing
-        # whitespace correctly without mangling intra-line content.
+        # Strip inline #/; comments, take the first token.
         stripped=${raw%%[#;]*}
         read -r mod _ <<< "$stripped" || true
         [ -n "$mod" ] || continue

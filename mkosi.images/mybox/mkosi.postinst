@@ -1,43 +1,24 @@
 #!/usr/bin/env bash
-# mybox postinst.
-#
-# Shared baseline (preset-all, SELinux subs, /root|/mnt symlinks,
-# /srv mountpoint, version metadata) lives in
-# mkosi.shared/postinst-common.sh — same source as the main image
-# postinst. This wrapper sources it then adds mybox-specific masks
-# for boot-stack services that genuinely break inside nspawn.
+# mybox postinst: shared baseline from mkosi.shared/postinst-common.sh
+# (same source as the main image postinst) plus mybox-specific masks for
+# boot-stack units that break inside nspawn.
 
 set -euo pipefail
 
 STAGE="${1:-final}"
 [ "$STAGE" = "final" ] || exit 0
 
-# Shared baseline.
 source "${SRCDIR}/mkosi.shared/postinst-common.sh"
 
-# Mybox-specific: mask the SHORT list of units that cannot run inside
-# nspawn. Mask = symlink to /dev/null in /usr/lib/systemd/system/
-# (NOT /etc/, which would only land in the writable /etc overlay).
-# Everything not on this list stays as preset-all wired it —
-# systemd-sysext.service, myosi-sysext-relabel.service,
-# myosi-glib-schemas-compile.service, myosi-firstboot-pam.service,
-# systemd-homed.service + myosi-homed-user@ template,
-# sshd-keygen serialization drop-ins all stay enabled.
+# Mask only units that cannot run inside nspawn (verity/LUKS/repart/
+# binfmt/ESP — nspawn handles or forbids all of them). Mask must live in
+# /usr/lib/systemd/system/, not /etc/ (that would only land in the
+# writable overlay). Everything else stays as preset-all wired it.
 mask_units=(
-    # dm-verity setup — root is dissected + verity-validated by nspawn
-    # itself from the GPT partitions; the in-container service has
-    # nothing left to do.
     systemd-veritysetup@root.service
-    # LUKS unlock for data partition — nspawn doesn't unlock anything;
-    # /var + /home come from data.raw via host-side prep + Bind=.
     systemd-cryptsetup@data.service
-    # systemd-repart wants a real GPT to lay out partitions — N/A.
     systemd-repart.service
-    # binfmt_misc registers /proc/sys/fs/binfmt_misc interpreters, a
-    # per-namespace mount. nspawn either already mounted it (noop) or
-    # can't (fails). Mask = clean journal either way.
     systemd-binfmt.service
-    # ESP / boot mounts — no ESP in nspawn.
     efi.mount
     boot.mount
 )
@@ -49,29 +30,7 @@ for unit in "${mask_units[@]}"; do
     fi
 done
 
-# Caveats to know about (no executable steps):
-#
-#   - kmod sysexts (nvidia*, zfs) ship .ko files into /usr/lib/modules/
-#     after merge but the host kernel won't load them — module loading
-#     is host-kernel-space. The userspace bits in the same sysext DO
-#     land in /usr after merge and are usable inside the container.
-#     NVIDIA userspace LIBS specifically should come from the host CDI
-#     bind instead (see containers/machines/_features/40-gpu-nvidia)
-#     to keep driver versions in sync with the host kernel module.
-#   - systemd-sysext.service ConditionDirectoryNotEmpty gate fires
-#     normally on /etc/extensions/, /run/extensions/,
-#     /var/lib/extensions/, /.extra/sysext/ — same as bare-metal. The
-#     baked-sync drop-in (15-myosi-baked-sync.conf) materializes any
-#     baselines shipped under /usr/share/myosi/extensions/ into
-#     /var/lib/extensions/ via the chicken-egg ConditionDirectoryNotEmpty
-#     OR-extension on /usr/share/myosi/extensions/.
-#   - SELinux: works. base-tree ships selinux-policy-targeted + xattrs
-#     baked via mkfs.erofs --file-contexts. nspawn assigns container_t
-#     to processes. The /usr/share/factory/etc → /etc subs registered by the shared
-#     postinst-common.sh ensure the overlay lowerdir gets etc_t labels.
-#
-# Flatpak remotes are NOT pre-seeded (flatpak remote-add writes to
-# /var/lib/flatpak/ which lives on data.raw /var). Operator runs once
-# on first boot inside the container:
-#   flatpak remote-add --system --if-not-exists flathub \
-#       https://dl.flathub.org/repo/flathub.flatpakrepo
+# Caveats: kmod sysexts merge .ko files the host kernel ignores (use
+# host CDI bind for NVIDIA libs); SELinux works via erofs --file-contexts
+# xattrs + container_t. Flatpak remotes not pre-seeded — operator runs
+# `flatpak remote-add ... flathub` once on first boot.

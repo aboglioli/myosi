@@ -3,15 +3,8 @@ Description=Restore SELinux labels on mutable /etc after sysext merges
 Documentation=man:systemd-sysext(8)
 ConditionSecurity=selinux
 After=systemd-sysext.service
-# Before=sshd-keygen.target covers sshd-keygen@{rsa,ecdsa,ed25519}.service
-# (the per-type oneshots that write host keys). Ordering this relabel
-# Before=sshd-keygen.target is belt-and-suspenders: the /etc subvol
-# root already has etc_t (myosi-data-attach sets it in the initrd; the
-# tmpfiles `t /etc` rule re-stamps it every boot), so file-level
-# fcontext rules in policy place ssh_host_*_key as sshd_key_t on
-# creation. Running this restorecon first guarantees the result even
-# if a future image change leaves /etc/ssh briefly under a wrong
-# parent label.
+# Before=sshd-keygen.target is belt-and-suspenders so host keys land as
+# sshd_key_t even if /etc/ssh is briefly under a wrong parent label.
 Before=systemd-user-sessions.service sshd.service sshd-keygen.target login.service multi-user.target
 
 [Service]
@@ -19,16 +12,9 @@ Type=oneshot
 RemainAfterExit=yes
 StandardOutput=journal+console
 StandardError=journal+console
-# Signed raw sysext images are read-only erofs/verity lowerdirs. Runtime
-# restorecon cannot be the primary fix for files inside them because it
-# cannot persist new security.selinux xattrs there. Those labels are baked
-# into extension images at build time by mkfs.erofs --file-contexts (see
-# mkosi.shared/sysext.conf).
-#
-# This unit intentionally limits runtime relabeling to /etc, where myosi
-# has a writable persistent btrfs subvolume on data-luks for mutable
-# host state. It repairs local overrides without producing misleading
-# failures from trying to relabel the read-only /usr sysext overlay.
+# Only /etc: sysext raws are read-only erofs/verity lowerdirs, so runtime
+# restorecon can't persist xattrs there — those labels are baked at build
+# time via mkfs.erofs --file-contexts (mkosi.shared/sysext.conf).
 ExecStart=-/usr/sbin/restorecon -iRF /etc
 
 [Install]
