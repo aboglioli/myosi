@@ -1,0 +1,8 @@
+*.key
+*.crt
+*.bak
+*.pem
+*.fd
+!.gitignore
+!README.md
+!generate-keys.sh

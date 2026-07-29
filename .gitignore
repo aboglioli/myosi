@@ -1,0 +1,89 @@
+# Implementation plans are working docs, not committed
+docs/2026-*-plan.md
+
+# Local developer overrides (never commit)
+mkosi.local.conf
+mkosi.local/
+
+# Build artifacts
+build/
+*.raw
+*.raw.xz
+
+# Track extension symlinks (*.raw) inside per-host extra trees
+!hosts/*/extra/etc/extensions/*.raw
+*.efi
+*.verity
+*.verity-sig
+
+# Local signing keys and generated OVMF varstore
+keys/*.key
+keys/*.crt
+keys/*.fd
+
+# Bootstrap LUKS key. Persistent at keys/data.key (same lifecycle as
+# boot.key / image.key — generated once locally, sourced from
+# $MYOSI_DATA_KEY secret in CI). mkosi.postinst installs it into the
+# image at /usr/share/myosi/keys/data.key and /efi/keys/data.key, and
+# the initrd-extras mkosi.conf ExtraTrees= pulls the same source into
+# /usr/share/myosi/keys/data.key in the initrd cpio.
+keys/data.key
+
+# mkosi auto-generates these at the project root if SecureBootKey/Cert
+# aren't both pinned (or as a fallback). Ephemeral, never commit.
+mkosi.key
+mkosi.crt
+
+# Sub-image build outputs that land in their source dirs (initrd cpio,
+# kernel binary, extracted rootfs tree, symlinks). mkosi v26 drops these
+# next to each sub-image's mkosi.conf after a build; same names recur for
+# every sub-image (base-tree, containers, desktop, firmware, virt, ...).
+mkosi.images/*/*.cpio
+mkosi.images/*/*.cpio.zst
+mkosi.images/*/*.initrd
+mkosi.images/*/*.vmlinuz
+# `initrd` symlink mkosi creates next to the cpio output when a sub-image
+# is built standalone (`mkosi -f -C mkosi.images/<name> build`). Match any
+# sub-image, not just initrd.
+mkosi.images/*/initrd
+# Extracted rootfs trees mkosi leaves under the sub-image dir as
+# mkosi.images/<name>/<name>/ (read-only directory tree from the build).
+mkosi.images/base-tree/base-tree/
+mkosi.images/containers/containers/
+mkosi.images/desktop/desktop/
+mkosi.images/firmware/firmware/
+mkosi.images/virt/virt/
+mkosi.images/nvidia/nvidia/
+mkosi.images/nvidia-580xx/nvidia-580xx/
+mkosi.images/zfs/zfs/
+mkosi.images/initrd/initrd/
+
+# CI writes packages/pinned-kernel.txt fresh per release as a build
+# audit/output (records what kernel the release artifacts were built
+# against). Nothing in the build pipeline consumes it as a source,
+# so it's a pure output — keep the dir untracked.
+packages/
+
+# Per-host secrets
+hosts/*/secrets/
+
+# mkosi caches
+mkosi.cache/
+mkosi.builddir/
+mkosi.output/
+
+# Editor + OS noise
+.direnv/
+.envrc
+*.swp
+*.swo
+.DS_Store
+
+# Sub-image build outputs (mkosi sometimes drops them in source dirs)
+mkosi.images/*/[a-z]*.raw
+mkosi.images/*/[a-z]*.raw.xz
+mkosi.images/*/[a-z]*.raw.zst
+mkosi.images/*/[a-z]*.efi
+
+# swtpm state from local VM testing (contains TPM key material)
+vm-test/tpm/

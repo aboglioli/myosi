@@ -1,0 +1,21 @@
+[rpmfusion-free]
+name=RPM Fusion for Fedora $releasever - Free
+metalink=https://mirrors.rpmfusion.org/metalink?repo=free-fedora-$releasever&arch=$basearch
+enabled=1
+type=rpm-md
+gpgcheck=1
+gpgkey=https://download1.rpmfusion.org/free/fedora/RPM-GPG-KEY-rpmfusion-free-fedora-2020
+repo_gpgcheck=0
+skip_if_unavailable=True
+metadata_expire=14d
+
+[rpmfusion-free-updates]
+name=RPM Fusion for Fedora $releasever - Free - Updates
+metalink=https://mirrors.rpmfusion.org/metalink?repo=free-fedora-updates-released-$releasever&arch=$basearch
+enabled=1
+type=rpm-md
+gpgcheck=1
+gpgkey=https://download1.rpmfusion.org/free/fedora/RPM-GPG-KEY-rpmfusion-free-fedora-2020
+repo_gpgcheck=0
+skip_if_unavailable=True
+metadata_expire=14d

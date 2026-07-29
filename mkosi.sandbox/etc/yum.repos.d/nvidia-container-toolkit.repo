@@ -1,0 +1,27 @@
+# Pre-edited from
+#   https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo
+# - The upstream file ships `sslcacert=/etc/pki/tls/certs/ca-bundle.crt`,
+#   which fails inside mkosi's sandbox because the build env's CA bundle
+#   lives at a different path. dnf falls back to the system CA store when
+#   sslcacert is absent — drop the line here so we don't have to sed it
+#   out post-curl like nvidia-build.sh used to.
+# - The experimental sub-repo is kept disabled (matching upstream
+#   default; we never want bleeding-edge nvidia-container-toolkit in a
+#   sealed sysext build).
+
+[libnvidia-container]
+name=libnvidia-container
+baseurl=https://nvidia.github.io/libnvidia-container/stable/rpm/$basearch
+repo_gpgcheck=1
+gpgcheck=0
+gpgkey=https://nvidia.github.io/libnvidia-container/gpgkey
+sslverify=1
+
+[libnvidia-container-experimental]
+name=libnvidia-container-experimental
+baseurl=https://nvidia.github.io/libnvidia-container/experimental/rpm/$basearch
+repo_gpgcheck=1
+gpgcheck=0
+gpgkey=https://nvidia.github.io/libnvidia-container/gpgkey
+sslverify=1
+enabled=0

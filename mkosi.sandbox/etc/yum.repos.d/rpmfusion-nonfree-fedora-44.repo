@@ -1,0 +1,21 @@
+[rpmfusion-nonfree]
+name=RPM Fusion for Fedora $releasever - Nonfree
+metalink=https://mirrors.rpmfusion.org/metalink?repo=nonfree-fedora-$releasever&arch=$basearch
+enabled=1
+type=rpm-md
+gpgcheck=1
+gpgkey=https://download1.rpmfusion.org/nonfree/fedora/RPM-GPG-KEY-rpmfusion-nonfree-fedora-2020
+repo_gpgcheck=0
+skip_if_unavailable=True
+metadata_expire=14d
+
+[rpmfusion-nonfree-updates]
+name=RPM Fusion for Fedora $releasever - Nonfree - Updates
+metalink=https://mirrors.rpmfusion.org/metalink?repo=nonfree-fedora-updates-released-$releasever&arch=$basearch
+enabled=1
+type=rpm-md
+gpgcheck=1
+gpgkey=https://download1.rpmfusion.org/nonfree/fedora/RPM-GPG-KEY-rpmfusion-nonfree-fedora-2020
+repo_gpgcheck=0
+skip_if_unavailable=True
+metadata_expire=14d

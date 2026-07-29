@@ -1,0 +1,27 @@
+[Build]
+WorkspaceDirectory=/var/home/<user>/.cache/mkosi-workspace
+
+[Config]
+Profiles=containers
+Profiles=virt
+Dependencies=desktop
+Dependencies=nvidia
+# Dependencies=mybox
+
+# ──────────────────────────────────────────────────────────────────
+# QEMU testing overrides — keep SecureBoot-free + serial-console
+# wiring so vm-test/run-vm.sh can boot the .raw under plain UEFI.
+# SELinux stays enforcing. NEVER ship to real hardware with these
+# overrides — they unwind the production boot trust chain.
+# ──────────────────────────────────────────────────────────────────
+
+[Output]
+CompressOutput=no
+
+[Content]
+ShimBootloader=none
+KernelCommandLine=console=ttyS0
+
+[Runtime]
+Register=no
+Firmware=uefi
