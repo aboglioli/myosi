@@ -3,7 +3,7 @@
 # PartitionUUIDs per the Discoverable Partitions Spec.
 #
 # Usage:
-#   IMAGE_VERSION=<calver> [OUTPUTDIR=build] ci/lib/stage-artifacts.sh
+#   IMAGE_VERSION=<calver> [OUTPUTDIR=build] scripts/stage-artifacts.sh
 #
 # This script MUST run AFTER `mkosi build` has fully completed and
 # staged all split artifacts (including the UKI) under OUTPUTDIR.

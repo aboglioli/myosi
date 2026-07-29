@@ -126,7 +126,7 @@ myosi/
 ├── keys/                    # signing key staging directory (gitignored key material)
 ├── scripts/                 # host-side build/CI helpers (generate-keys, decode-keys,
 │                              stage-artifacts, sysupdate-manifest)
-├── ci/                      # GitHub Actions workflow + test harnesses
+├── .github/workflows/      # GitHub Actions release workflow
 └── justfile                 # all developer + operator commands
 ```
 
@@ -2503,9 +2503,8 @@ All build-time host-side scripts now live under `myosi/scripts/`:
 - `scripts/sysupdate-manifest.sh` — generates `sysupdate-manifest.json`
   for release artifacts.
 
-`myosi/ci/` retains only the test runners (`test-update-model.sh`,
-`test-extension-lifecycle.sh`, `test-mount-options.sh`,
-`test-sysext-systemd-enablement.sh`).
+The former `ci/` tree-consistency test scripts were removed — they will
+be reworked as VM-based tests rather than static file checks.
 
 ## Documentation consolidation
 
@@ -5107,7 +5106,7 @@ Cataloging where myosi consciously departs from the sibling project. Each is a d
   Build infrastructure:
   - `mkosi.shared/sysext-build.sh::stage_sandbox_repos` extracted as a shared helper for the per-sysext `mkosi.sandbox/etc/yum.repos.d/*.repo` copy step. Fail-fast on missing repo files. Used by desktop / virt / nvidia postinsts.
   - `mkosi.postinst` postinst preset application loop now covers six myosi-* units (relabel × 2, depmod, firmware-reprobe, glib-schemas-compile, sysusers-after-sysext).
-  - CI (`ci/test-update-model.sh`) locks in: boot-ordering invariants (`DefaultDependencies=no` / `WantedBy=sysinit.target` for firmware-reprobe; no `Before=basic.target` for glib-schemas-compile), marker namespace (`/var/lib/myosi/.marks/*.done` only), `sysupdate` symlink presence, `MYOSI_SYSUPDATE_BIN` default, `command -v "$SYSUPDATE"` (not `[ -x ]`) in recipes, audit cmdline value.
+  - CI (the since-removed `ci/test-update-model.sh`) locked in: boot-ordering invariants (`DefaultDependencies=no` / `WantedBy=sysinit.target` for firmware-reprobe; no `Before=basic.target` for glib-schemas-compile), marker namespace (`/var/lib/myosi/.marks/*.done` only), `sysupdate` symlink presence, `MYOSI_SYSUPDATE_BIN` default, `command -v "$SYSUPDATE"` (not `[ -x ]`) in recipes, audit cmdline value.
 
   Documentation cleanups:
   - `.gitkeep` removed from `mkosi.extra/usr/share/myosi/` (was leaking into the deployed `/usr/share/myosi/.gitkeep`).

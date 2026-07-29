@@ -8,9 +8,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Keys land at <repo>/keys/ — exactly ONE level up from this script's
 # dir. mkosi reads keys/ relative to the project root; a wrong level
-# here aborts the build at cert validation (ci/test-update-model.sh
-# asserts the pattern). mkdir before resolving so `cd` succeeds on
-# first run.
+# aborts the build at cert validation ("Failed to load X.509
+# certificate"). mkdir before resolving so `cd` succeeds on first run.
 DST="${SCRIPT_DIR}/../keys"
 mkdir -p "$DST"
 chmod 700 "$DST"
