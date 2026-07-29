@@ -1,0 +1,17 @@
+[Unit]
+Description=Ensure flathub remote is configured (system-wide)
+# Per-task completion markers live under /var/lib/myosi/.marks/, one
+# .done file per oneshot, named after the service/task.
+ConditionPathExists=!/var/lib/myosi/.marks/flatpak-setup.done
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/mkdir -p /var/lib/myosi/.marks
+ExecStart=/usr/libexec/myosi/flatpak-setup
+ExecStartPost=/usr/bin/touch /var/lib/myosi/.marks/flatpak-setup.done
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

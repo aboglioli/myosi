@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+#
+# One-shot host integration for the myosi virt sysext.
+#
+# Idempotent. Re-runs are safe — every step checks for existing state
+# before creating. Operator runs once after `extension-enable virt`;
+# subsequent reboots need nothing.
+#
+# What it does:
+#
+#   1. (default, --skip-bridge to skip)
+#      Creates a host NetworkManager bridge `br0` enslaving the
+#      operator's chosen physical iface. VMs that attach to this
+#      bridge get DHCP from the LAN router — peers of the host.
+#
+#   2. Defines libvirt networks:
+#        default   NAT 192.168.122/24 via virbr0
+#                  (from /usr/share/libvirt/networks/default.xml)
+#        br0       <forward mode='bridge'/> pointing at the host br0
+#                  (only if br0 exists at the time of the run)
+#
+#   3. Defines libvirt storage pools at the standard upstream paths
+#      under /var/lib/libvirt/ (a btrfs nodatacow subvol, see fstab):
+#        default   /var/lib/libvirt/images  (qemu:qemu, virt_image_t)
+#        isos      /var/lib/libvirt/isos    (root:root, virt_content_t)
+#      Both directories are pre-created by the virt sysext's tmpfiles
+#      drop-in; this script just registers them with libvirt.
+#      Stock SELinux policy labels the standard /var/lib/libvirt tree —
+#      no file_contexts aliases needed.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
+. "${SCRIPT_DIR}/lib.sh"
+
+require_root
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: /usr/libexec/myosi/virt-setup [options]
+
+Options:
+  --bridge-iface=<iface>   Physical iface to enslave to br0.
+                           Default: auto-detect from default route.
+  --skip-bridge            Do not create the host br0 bridge.
+                           Only configure libvirt networks + pools.
+  --bridge-only            Create the host br0 bridge and exit.
+                           Skip libvirt setup.
+  -h, --help               Show this message.
+EOF
+}
+
+BRIDGE_IFACE=""
+SKIP_BRIDGE=0
+BRIDGE_ONLY=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --bridge-iface=*)  BRIDGE_IFACE="${arg#*=}" ;;
+        --skip-bridge)     SKIP_BRIDGE=1 ;;
+        --bridge-only)     BRIDGE_ONLY=1 ;;
+        -h|--help)         usage; exit 0 ;;
+        *)                 echo "ERROR: unknown arg: $arg" >&2; usage; exit 2 ;;
+    esac
+done
+
+# ---------------------------------------------------------------------
+# Step 1 — host br0 bridge via NetworkManager
+# ---------------------------------------------------------------------
+
+setup_host_bridge() {
+    if ! command -v nmcli >/dev/null; then
+        echo "ERROR: NetworkManager (nmcli) required for bridge setup." >&2
+        echo "       Run with --skip-bridge to do libvirt only."         >&2
+        exit 4
+    fi
+
+    if [ -z "$BRIDGE_IFACE" ]; then
+        BRIDGE_IFACE=$(ip -4 route show default 2>/dev/null | awk '/^default/ {print $5; exit}')
+        if [ -z "$BRIDGE_IFACE" ]; then
+            echo "ERROR: could not auto-detect default-route iface." >&2
+            echo "       Pass --bridge-iface=<iface>. Available:"     >&2
+            ip -br link | awk '$1 != "lo" {print "         " $1}' >&2
+            exit 5
+        fi
+        echo "Auto-detected default-route iface: $BRIDGE_IFACE"
+    fi
+
+    if ! ip link show "$BRIDGE_IFACE" >/dev/null 2>&1; then
+        echo "ERROR: iface $BRIDGE_IFACE does not exist" >&2
+        exit 6
+    fi
+
+    if [ "$BRIDGE_IFACE" = "br0" ]; then
+        echo "$BRIDGE_IFACE is already br0; nothing to do."
+        return 0
+    fi
+
+    if [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CONNECTION:-}" ]; then
+        echo
+        echo "WARNING: you appear to be connected via SSH."                   >&2
+        echo "         Creating the bridge will briefly take $BRIDGE_IFACE"   >&2
+        echo "         offline. SSH should reconnect automatically once br0"  >&2
+        echo "         is up and inherits the IP, but a 5-30 s gap is normal." >&2
+        echo "         If the bridge fails to come up you will be locked out" >&2
+        echo "         until console access."                                 >&2
+        echo
+        read -r -p "Continue? (y/N) " r
+        [ "${r,,}" = "y" ] || { echo "Aborted."; exit 1; }
+    fi
+
+    if nmcli -t -f NAME con show | grep -qx 'br0'; then
+        echo "NetworkManager connection 'br0' already exists — skipping bridge create."
+    else
+        echo "Creating bridge br0 with $BRIDGE_IFACE as slave..."
+        nmcli con add type bridge \
+            ifname br0 con-name br0 \
+            bridge.stp no \
+            ipv4.method auto ipv6.method auto
+        nmcli con add type ethernet \
+            ifname "$BRIDGE_IFACE" master br0 \
+            con-name "br0-${BRIDGE_IFACE}"
+
+        # Bring down any pre-existing connection on the slave iface, then
+        # bring up bridge + slave. br0 inherits DHCP via ipv4.method auto.
+        existing=$(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null \
+                   | awk -F: -v d="$BRIDGE_IFACE" '$2 == d {print $1; exit}')
+        if [ -n "$existing" ] && [ "$existing" != "br0-${BRIDGE_IFACE}" ]; then
+            echo "Disabling existing connection '$existing' on $BRIDGE_IFACE..."
+            nmcli con down "$existing" || true
+        fi
+
+        nmcli con up br0
+        nmcli con up "br0-${BRIDGE_IFACE}"
+        echo "br0 is up:"
+        ip -br addr show br0
+    fi
+}
+
+# ---------------------------------------------------------------------
+# Step 2 — libvirt networks + pools
+# ---------------------------------------------------------------------
+
+setup_libvirt() {
+    if ! command -v virsh >/dev/null; then
+        echo "ERROR: virsh not available. Is the virt sysext enabled?" >&2
+        echo "       Run:  sudo myosi extension-enable virt"              >&2
+        exit 7
+    fi
+
+    # Wait for virtqemud to be reachable. Socket-activated, so the first
+    # virsh call wakes it up; we just want a clean error if it can't.
+    if ! virsh -c qemu:///system list >/dev/null 2>&1; then
+        echo "ERROR: cannot reach the libvirt system instance (qemu:///system)." >&2
+        echo "       Check 'systemctl status virtqemud.socket'." >&2
+        exit 8
+    fi
+
+    # ---- network: default (NAT virbr0) ----
+    default_tpl="/usr/share/libvirt/networks/default.xml"
+    if [ ! -f "$default_tpl" ]; then
+        echo "WARN: $default_tpl missing; skipping default NAT network" >&2
+    elif virsh net-info default >/dev/null 2>&1; then
+        echo "libvirt network 'default' already defined."
+    else
+        echo "Defining libvirt 'default' NAT network from upstream template..."
+        virsh net-define "$default_tpl"
+        virsh net-autostart default
+        virsh net-start default 2>/dev/null || true
+    fi
+
+    # ---- network: br0 (only if host bridge exists) ----
+    if ip link show br0 >/dev/null 2>&1; then
+        if virsh net-info br0 >/dev/null 2>&1; then
+            echo "libvirt network 'br0' already defined."
+        else
+            echo "Defining libvirt 'br0' bridge network..."
+            virsh net-define /dev/stdin <<'XML'
+<network>
+  <name>br0</name>
+  <forward mode='bridge'/>
+  <bridge name='br0'/>
+</network>
+XML
+            virsh net-autostart br0
+            virsh net-start br0 2>/dev/null || true
+        fi
+    else
+        echo "Host bridge br0 not present — skipping libvirt 'br0' network."
+        echo "Re-run virt-setup (without --skip-bridge) once the bridge exists."
+    fi
+
+    # ---- pools: default (qcow2 disks) + isos ----
+    for entry in "default:/var/lib/libvirt/images" "isos:/var/lib/libvirt/isos"; do
+        name="${entry%%:*}"
+        path="${entry#*:}"
+        if virsh pool-info "$name" >/dev/null 2>&1; then
+            echo "libvirt pool '$name' already defined."
+            continue
+        fi
+        mkdir -p "$path"
+        echo "Defining libvirt pool '$name' at $path..."
+        virsh pool-define-as "$name" dir --target "$path"
+        virsh pool-autostart "$name"
+        virsh pool-start "$name" 2>/dev/null || true
+    done
+}
+
+# ---------------------------------------------------------------------
+# Main flow
+# ---------------------------------------------------------------------
+
+if [ "$SKIP_BRIDGE" -ne 1 ]; then
+    setup_host_bridge
+fi
+
+if [ "$BRIDGE_ONLY" -ne 1 ]; then
+    setup_libvirt
+fi
+
+echo
+echo "Done."
+if command -v virsh >/dev/null && [ "$BRIDGE_ONLY" -ne 1 ]; then
+    echo
+    echo "== libvirt networks =="
+    virsh net-list --all 2>/dev/null || true
+    echo
+    echo "== libvirt pools =="
+    virsh pool-list --all 2>/dev/null || true
+fi

@@ -1,0 +1,22 @@
+// Allow wheel-group members to install, update, and modify flatpak
+// repos without re-entering their password. Same pattern used by
+// ublue (uBlue Project) — operator already authenticated to the
+// session, no value in re-prompting per-action for a tool the
+// operator obviously trusts.
+//
+// Ships in the desktop sysext alongside flatpak itself: when the
+// sysext is merged this rule activates (after refresh_sysext()
+// reloads polkit), when it's disabled both flatpak and the rule
+// disappear together. Keeps base image free of desktop-specific
+// authz policy.
+
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.freedesktop.Flatpak.app-install" ||
+         action.id == "org.freedesktop.Flatpak.runtime-install" ||
+         action.id == "org.freedesktop.Flatpak.app-update" ||
+         action.id == "org.freedesktop.Flatpak.runtime-update" ||
+         action.id == "org.freedesktop.Flatpak.modify-repo") &&
+        subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+});
