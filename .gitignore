@@ -1,6 +1,7 @@
 # Local developer overrides (never commit)
 mkosi.local.conf
 mkosi.local/
+.local/
 
 # Build artifacts
 build/
