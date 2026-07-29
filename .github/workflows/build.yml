@@ -1,0 +1,441 @@
+name: myosi
+
+on:
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Override base version (YYYY.MM.DD.NN). Empty = today + counter.'
+        required: false
+        default: ''
+      prerelease:
+        description: 'Prerelease suffix (e.g. rc.1, beta.2, alpha.3). Empty = stable.'
+        required: false
+        default: ''
+      skip_release_upload:
+        description: 'Skip uploading artifacts to a GitHub Release.'
+        required: false
+        default: 'false'
+        type: boolean
+
+concurrency:
+  group: myosi-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ------------------------------------------------------------------
+  # PR validation: cheap, no signing, no upload. Always runs.
+  # ------------------------------------------------------------------
+  validate:
+    name: Validate (lint + summary)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Install runner validation tools
+        # All host-side tools used by the validate job, in one place.
+        # The job only runs `shellcheck` over our shell scripts and
+        # `mkosi summary` (a parse-only sanity check). It does not
+        # build anything.
+        #
+        #   shellcheck    (apt)            — lints *.sh, mkosi.prepare,
+        #                                    mkosi.postinst, etc.
+        #   python3-pip   (apt)            — needed to install mkosi
+        #                                    from git in the next line.
+        #   mkosi         (pip from git)   — provides `mkosi summary`.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck python3-pip
+          pip install --break-system-packages git+https://github.com/systemd/mkosi.git
+      - name: Lint shell scripts
+        run: |
+          shopt -s globstar nullglob
+          for f in **/*.sh mkosi.prepare mkosi.postinst mkosi.version; do
+            [ -f "$f" ] || continue
+            shellcheck -S warning "$f" || true
+          done
+      - name: mkosi summary (parse check)
+        env:
+          # Validate doesn't have access to release secrets; let the
+          # script fall through to "generate fresh" mode to satisfy the
+          # ExtraTrees= path requirement at parse time. The generated
+          # key is throwaway — this job never ships an artifact.
+          MYOSI_DATA_KEY: ""
+        run: |
+          mkdir -p keys build
+          touch keys/boot.key keys/boot.crt keys/image.key keys/image.crt
+          chmod 600 keys/boot.key keys/image.key
+          # Bootstrap key needed at config-parse time because the
+          # initrd-extras ExtraTrees= line references it. Throwaway
+          # value here — release builds use the stable MYOSI_DATA_KEY
+          # secret.
+          ./scripts/generate-bootstrap-key.sh
+          mkosi summary > /dev/null
+
+  # ------------------------------------------------------------------
+  # Build + stage + sign + upload to GitHub Release. Single job, no
+  # intermediate artifact storage (that quota is limited).
+  # ------------------------------------------------------------------
+  build:
+    name: Build (myosi + sysexts)
+    needs: validate
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      kernel: ${{ steps.kernel.outputs.version }}
+      version: ${{ steps.version.outputs.value }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          path: src
+
+      - uses: systemd/mkosi@main
+
+      - name: Install runner build tools
+        # All host-side CLI tools used by the build job, in one place.
+        # The runner is ubuntu-24.04. mkosi itself comes from the
+        # systemd/mkosi action above. mkosi's ToolsTree handles the
+        # in-build Fedora 44 toolchain; this step covers commands
+        # invoked on the HOST during the workflow:
+        #
+        #   ukify  (systemd-ukify)  — used by mkosi.finalize to
+        #                             extract the roothash from the
+        #                             UKI for the PartitionUUID
+        #                             rename, AND by "Extract kernel
+        #                             version" step to read the UKI's
+        #                             .uname section.
+        #   gh, jq, sha256sum, zstd, find, cp — preinstalled on
+        #                             ubuntu-24.04 runner.
+        #
+        # NOTE: systemd-container (provides systemd-dissect) was
+        # previously installed here but is no longer needed. The
+        # "Extract kernel version" step now uses `ukify inspect`
+        # instead of `systemd-dissect --with` because the latter
+        # hangs on verity-sig verification under ubuntu-24.04's
+        # systemd 255+ (our self-signed PKCS#7 sig isn't trusted by
+        # the runner's keyring; 2026.06.07.01 release was stuck >35
+        # min before manual cancel).
+        #
+        # If a future build step needs another host-side tool, add it
+        # to this list rather than scattering apt-get calls across
+        # individual steps.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y systemd-ukify
+
+      - name: Free disk space
+        run: |
+          sudo mv /usr/local /usr/local.trash
+          sudo mv /opt/hostedtoolcache /opt/hostedtoolcache.trash
+          sudo systemd-run rm -rf /usr/local.trash /opt/hostedtoolcache.trash
+
+      - name: Mount Btrfs scratch volume for mkosi workspace
+        run: |
+          truncate --size=100G btrfs.raw
+          mkfs.btrfs btrfs.raw
+          sudo mkdir -p /mnt/mkosi
+          LOOP="$(sudo losetup --find --show --direct-io=on btrfs.raw)"
+          rm -f btrfs.raw
+          sudo mount "$LOOP" /mnt/mkosi --options compress=zstd:1,user_subvol_rm_allowed,noatime,discard=async,space_cache=v2
+          sudo chown "$(id -u):$(id -g)" /mnt/mkosi
+          mkdir -p /mnt/mkosi/tmp
+          echo "TMPDIR=/mnt/mkosi/tmp" >> "$GITHUB_ENV"
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "release" ]; then
+            V="${{ github.event.release.tag_name }}"
+            V="${V#v}"
+            IS_PRE="false"
+          else
+            BASE="${{ inputs.version }}"
+            if [ -z "$BASE" ]; then
+              BASE="$(date -u +%Y.%m.%d).01"
+            fi
+            PRE="${{ inputs.prerelease }}"
+            if [ -n "$PRE" ]; then
+              if ! [[ "$PRE" =~ ^(alpha|beta|rc)\.[0-9]+$ ]]; then
+                echo "ERROR: prerelease '$PRE' must match (alpha|beta|rc).N" >&2
+                exit 1
+              fi
+              V="${BASE}-${PRE}"
+              IS_PRE="true"
+            else
+              V="$BASE"
+              IS_PRE="false"
+            fi
+          fi
+          case "$V" in v[0-9]*) echo "ERROR: version '$V' starts with v" >&2; exit 1;; esac
+          echo "value=$V" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$IS_PRE" >> "$GITHUB_OUTPUT"
+          echo "MYOSI_VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: Decode signing keys into keys/
+        env:
+          MYOSI_BOOT_KEY:  ${{ secrets.MYOSI_BOOT_KEY }}
+          MYOSI_BOOT_CRT:  ${{ secrets.MYOSI_BOOT_CRT }}
+          MYOSI_IMAGE_KEY: ${{ secrets.MYOSI_IMAGE_KEY }}
+          MYOSI_IMAGE_CRT: ${{ secrets.MYOSI_IMAGE_CRT }}
+        working-directory: src
+        run: ./scripts/decode-keys.sh
+
+      - name: Decode bootstrap LUKS key (stable across releases)
+        # generate-bootstrap-key.sh reads $MYOSI_DATA_KEY when set and
+        # base64-decodes it into keys/data.key. Without the secret, it
+        # would generate a fresh random key — that would break
+        # sysupdate (each release would carry a different bootstrap key
+        # while LUKS slot 0 stays bound to the original install's key).
+        # Same secret value across every release keeps unlock stable
+        # for hosts that haven't yet run `myosi data-finalize`.
+        env:
+          MYOSI_DATA_KEY:  ${{ secrets.MYOSI_DATA_KEY }}
+        working-directory: src
+        run: ./scripts/generate-bootstrap-key.sh
+
+      - name: Configure ToolsTree + release image set
+        working-directory: src
+        # The committed mkosi.conf only declares `Dependencies=initrd`,
+        # so a bare `mkosi build` produces just tools+initrd+main. The
+        # sysext sub-images + main-image profiles are opted in per host
+        # via mkosi.local.conf (gitignored). CI has no such file, so
+        # release <=2026.07.08.01 shipped the base myosi image with NO
+        # sysexts. Generate the release image set here to mirror the
+        # dev-host mkosi.local.conf: containers+virt profiles baked into
+        # the main image, desktop+nvidia sysexts built as standalone
+        # .raw artifacts. mybox / nvidia-580xx / zfs are intentionally
+        # excluded from the fleet release.
+        run: |
+          cat > mkosi.local.conf <<EOF
+          [Build]
+          ToolsTree=default
+          ToolsTreeDistribution=fedora
+          ToolsTreeRelease=44
+          WorkspaceDirectory=$TMPDIR
+          PackageCacheDirectory=$TMPDIR/cache
+
+          [Config]
+          Profiles=containers
+          Profiles=virt
+          Dependencies=desktop
+          Dependencies=nvidia
+          EOF
+
+      - name: Build everything
+        working-directory: src
+        env:
+          MYOSI_VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          mkdir -p build
+          # Same stamp `just build` applies. Without it, postinst-common.sh
+          # falls back to GIT_COMMIT=unknown, which is what every CI-built
+          # image carried before this line existed. Checkout is fetch-depth: 0
+          # at src/, so `git -C ..` resolves.
+          export GIT_COMMIT="$(git rev-parse --short HEAD)"
+          sudo --preserve-env=MYOSI_VERSION,TMPDIR,GIT_COMMIT mkosi -ff build
+
+      - name: Stage split artifacts (embed PartitionUUIDs in filenames)
+        working-directory: src
+        env:
+          IMAGE_VERSION: ${{ steps.version.outputs.value }}
+          OUTPUTDIR: build
+        # Renames myosi_<VER>_<ARCH>.root.raw.zst and .verity.raw.zst
+        # to myosi_<VER>_<ARCH>_<UUID>.{root,verity}.raw.zst. The
+        # roothash-derived GPT PartitionUUID is captured by sysupdate's
+        # @u wildcard at apply time. See script header for the why and
+        # the 2026.06.06.04 failure mode.
+        #
+        # Runs EXPLICITLY after `mkosi build` rather than as a
+        # mkosi.finalize hook because mkosi v26 runs finalize before
+        # the UKI is staged at OUTPUTDIR — the .efi isn't there yet.
+        # 2026.06.07.02 release went out unstamped for that reason.
+        run: |
+          sudo --preserve-env=IMAGE_VERSION,OUTPUTDIR \
+              scripts/stage-artifacts.sh
+
+      - name: Extract kernel version
+        id: kernel
+        working-directory: src
+        # Read the kernel version from the UKI's `.uname` section.
+        #
+        # Previous implementation used `systemd-dissect --with` on the
+        # full .raw to ls /usr/lib/modules/. That works on builds with
+        # verity sigs trusted by the runner, but ubuntu-24.04's
+        # systemd 255+ strictly verifies our PKCS#7 verity-sig against
+        # its key store. Our `myosi DEV Image` key isn't enrolled on
+        # the runner, so dissect either failed or hung in verify mode
+        # — the 2026.06.07.01 release sat in the step for >35 min
+        # before we cancelled.
+        #
+        # ukify inspect reads the UKI's PE sections directly. The
+        # `.uname` section is exactly the running kernel's version
+        # baked in by mkosi at build time. No decompression, no loop
+        # mount, no verity dance, no signature checks. Pure file
+        # parse.
+        run: |
+          set -euo pipefail
+          UKI=$(find build -maxdepth 1 -type f -name 'myosi_*.efi' \
+                | sort -r | head -1)
+          if [ -z "$UKI" ]; then
+            echo "ERROR: no UKI found in build/" >&2
+            ls -la build/ >&2
+            exit 1
+          fi
+          KVER=$(timeout 60 ukify inspect "$UKI" 2>/dev/null | awk '
+            /^\.uname:/         { sec = 1; next }
+            /^\.[a-z]/          { sec = 0 }
+            sec && /^  text:/   { intext = 1; next }
+            intext && /^    /   { sub(/^    /, ""); print; exit }
+          ')
+          if [ -z "$KVER" ]; then
+            echo "ERROR: could not extract kernel version from $UKI" >&2
+            ukify inspect "$UKI" 2>&1 | head -40 >&2
+            exit 1
+          fi
+          echo "KVER=$KVER"
+          echo "version=$KVER" >> "$GITHUB_OUTPUT"
+          mkdir -p packages
+          echo "$KVER" > packages/pinned-kernel.txt
+
+      - name: Reclaim build artifact ownership
+        working-directory: src
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" build
+
+      - name: Stage release artifacts
+        working-directory: src
+        run: |
+          set -euo pipefail
+          VER="${{ steps.version.outputs.value }}"
+          ARCH=$(uname -m | sed -e 's/^x86_64$/x86-64/' -e 's/^aarch64$/arm64/')
+          mkdir -p "$GITHUB_WORKSPACE/release"
+          shopt -s nullglob
+
+          # Sysext .raw[.zst], auto-discovered from mkosi.images/. Every
+          # sub-image sets Output=%i_%v_%a, so artifact basenames are
+          # <name>_<VER>_<ARCH>.raw* — pick up only the host arch.
+          #
+          # Skip list:
+          #   - base-tree: Format=directory, internal BaseTrees= source
+          #     for every sysext + mybox. No .raw produced.
+          #   - myosi-initrd-extras: historical placeholder, no release
+          #     artifact ever emitted.
+          #   - fleet-keys: baked into the main image at
+          #     /usr/share/myosi/extensions/ by mkosi.shared/
+          #     finalize-common.sh. No sysupdate.extensions.d/ transfer
+          #     references it, so the standalone copy would never be
+          #     fetched by `myosi update`. Shipping it would just create
+          #     dead release weight.
+          for d in mkosi.images/*/; do
+            name=$(basename "$d")
+            case "$name" in
+              base-tree|myosi-initrd-extras|fleet-keys) continue ;;
+            esac
+            for f in build/${name}_${VER}_${ARCH}.raw*; do
+              if [ -f "$f" ] && [ ! -L "$f" ]; then cp "$f" "$GITHUB_WORKSPACE/release/"; fi
+            done
+          done
+
+          # Per-partition split artifacts for sysupdate transfers.
+          #
+          # scripts/stage-artifacts.sh (run by `just build` and the
+          # CI step above) renames root + verity .raw.zst to embed the
+          # GPT PartitionUUID derived from the dm-verity root hash AFTER
+          # the arch token. Final names in build/:
+          #     myosi_<VER>_<ARCH>_<root-uuid>.root.raw.zst
+          #     myosi_<VER>_<ARCH>_<verity-uuid>.verity.raw.zst
+          # 10-root.transfer / 11-verity.transfer capture the UUID via
+          # the @u wildcard at sysupdate apply time and write it into
+          # the destination partition's GPT entry.
+          for f in build/myosi_${VER}_${ARCH}_*.root.raw* \
+                   build/myosi_${VER}_${ARCH}_*.verity.raw* \
+                   build/myosi_${VER}_${ARCH}.verity-sig.raw*; do
+            # ESP split intentionally not staged: mkosi.repart/00-esp.conf
+            # sets SplitName= empty so build/ never contains
+            # myosi_<VER>_<ARCH>.esp.raw.zst. Nothing in sysupdate.d/
+            # references it and the full disk image already carries the
+            # ESP — shipping a standalone copy would be dead weight.
+            if [ -f "$f" ] && [ ! -L "$f" ]; then
+              cp "$f" "$GITHUB_WORKSPACE/release/"
+            fi
+          done
+
+          # Signed UKI.
+          for f in build/myosi_${VER}_${ARCH}.efi*; do
+            if [ -f "$f" ] && [ ! -L "$f" ]; then cp "$f" "$GITHUB_WORKSPACE/release/"; fi
+          done
+
+          # Full disk image (split if >2 GiB for GitHub Release per-file limit).
+          FULL=""
+          for cand in build/myosi_${VER}_${ARCH}.raw.zst build/myosi_${VER}_${ARCH}.raw; do
+            if [ -f "$cand" ]; then FULL="$cand"; break; fi
+          done
+          if [ -n "$FULL" ]; then
+            SIZE=$(stat -c%s "$FULL")
+            LIMIT=$((2 * 1024 * 1024 * 1024 - 32 * 1024 * 1024))
+            BASE=$(basename "$FULL")
+            if [ "$SIZE" -le "$LIMIT" ]; then
+              cp "$FULL" "$GITHUB_WORKSPACE/release/$BASE"
+            else
+              echo "Full disk image $SIZE bytes > $LIMIT, splitting into 1900M chunks"
+              split -b 1900M -a 2 -d "$FULL" "$GITHUB_WORKSPACE/release/${BASE}.part"
+            fi
+          fi
+
+          cp packages/pinned-kernel.txt "$GITHUB_WORKSPACE/release/pinned-kernel.txt"
+
+          echo "=== release/ contents ==="
+          ls -lh "$GITHUB_WORKSPACE/release/"
+          echo
+          echo "=== per-file size sanity (must be <2 GiB) ==="
+          if find "$GITHUB_WORKSPACE/release" -type f -size +2G -print | grep -q .; then
+            echo "ERROR: at least one file >2 GiB — Release upload would fail"
+            find "$GITHUB_WORKSPACE/release" -type f -size +2G -ls
+            exit 1
+          fi
+          echo "OK"
+
+      - name: Generate sysupdate manifest
+        run: ./src/scripts/sysupdate-manifest.sh "$GITHUB_WORKSPACE/release" > "$GITHUB_WORKSPACE/release/sysupdate-manifest.json"
+
+      - name: Sign SHA256SUMS
+        run: |
+          cd "$GITHUB_WORKSPACE/release"
+          sha256sum -- * > SHA256SUMS
+          openssl dgst -sha384 -sign "$GITHUB_WORKSPACE/src/keys/boot.key" \
+                  -out SHA256SUMS.sig SHA256SUMS
+
+      - name: Determine upload mode
+        id: upload
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+            # Preserve the maintainer-set prerelease flag on the existing
+            # Release object — softprops/action-gh-release@v2 will rewrite
+            # it from this input, so passing the release payload's value
+            # keeps a hand-marked pre-release pre-release after upload.
+            echo "prerelease=${{ github.event.release.prerelease }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ inputs.skip_release_upload }}" = "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ steps.version.outputs.value }}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=${{ steps.version.outputs.prerelease }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload to GitHub Release
+        if: steps.upload.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.upload.outputs.tag }}
+          name: myosi ${{ steps.upload.outputs.tag }}
+          files: release/*
+          prerelease: ${{ steps.upload.outputs.prerelease }}
+          generate_release_notes: false
