@@ -1,24 +1,22 @@
 name: myosi
 
+# Publishing is release-driven, same model as mybox: tag the repo (or
+# create a GitHub Release, which creates the tag) as YYYY.MM.DD or
+# YYYY.MM.DD.XX — the optional XX counts extra builds within a day.
+# The build job runs only for tag refs and uploads the artifacts as
+# assets of that tag's Release (created with the bare tag as title if
+# missing; an existing Release keeps its name and prerelease flag).
+# PRs and pushes to main run the cheap validate job only. A
+# workflow_dispatch from a tag ref re-runs the full build+upload.
+
 on:
+  push:
+    branches: [main]
+    tags:
+      - '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]'
+      - '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9].[0-9][0-9]'
   pull_request:
-  release:
-    types: [published]
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Override base version (YYYY.MM.DD.NN). Empty = today + counter.'
-        required: false
-        default: ''
-      prerelease:
-        description: 'Prerelease suffix (e.g. rc.1, beta.2, alpha.3). Empty = stable.'
-        required: false
-        default: ''
-      skip_release_upload:
-        description: 'Skip uploading artifacts to a GitHub Release.'
-        required: false
-        default: 'false'
-        type: boolean
 
 concurrency:
   group: myosi-${{ github.ref }}-${{ github.event_name }}
@@ -82,14 +80,10 @@ jobs:
   build:
     name: Build (myosi + sysexts)
     needs: validate
-    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    outputs:
-      kernel: ${{ steps.kernel.outputs.version }}
-      version: ${{ steps.version.outputs.value }}
-      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -150,33 +144,13 @@ jobs:
 
       - name: Resolve version
         id: version
+        # The tag IS the version — bare calver, no v prefix (the tag
+        # patterns enforce it). Filenames, MYOSI_VERSION and sysupdate
+        # @v interpolation all use it verbatim.
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "release" ]; then
-            V="${{ github.event.release.tag_name }}"
-            V="${V#v}"
-            IS_PRE="false"
-          else
-            BASE="${{ inputs.version }}"
-            if [ -z "$BASE" ]; then
-              BASE="$(date -u +%Y.%m.%d).01"
-            fi
-            PRE="${{ inputs.prerelease }}"
-            if [ -n "$PRE" ]; then
-              if ! [[ "$PRE" =~ ^(alpha|beta|rc)\.[0-9]+$ ]]; then
-                echo "ERROR: prerelease '$PRE' must match (alpha|beta|rc).N" >&2
-                exit 1
-              fi
-              V="${BASE}-${PRE}"
-              IS_PRE="true"
-            else
-              V="$BASE"
-              IS_PRE="false"
-            fi
-          fi
-          case "$V" in v[0-9]*) echo "ERROR: version '$V' starts with v" >&2; exit 1;; esac
+          V="${GITHUB_REF_NAME}"
           echo "value=$V" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$IS_PRE" >> "$GITHUB_OUTPUT"
           echo "MYOSI_VERSION=$V" >> "$GITHUB_ENV"
 
       - name: Decode signing keys into keys/
@@ -404,29 +378,19 @@ jobs:
           openssl dgst -sha384 -sign "$GITHUB_WORKSPACE/src/keys/boot.key" \
                   -out SHA256SUMS.sig SHA256SUMS
 
-      - name: Determine upload mode
-        id: upload
+      - name: Upload assets to the tag's GitHub Release
+        # gh only uploads assets — it never rewrites the name or the
+        # prerelease flag of an existing Release (the old softprops
+        # action renamed every release to "myosi <version>" after the
+        # run). A Release is created only when the tag has none yet,
+        # titled with the bare tag.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-            # Preserve the maintainer-set prerelease flag on the existing
-            # Release object — softprops/action-gh-release@v2 will rewrite
-            # it from this input, so passing the release payload's value
-            # keeps a hand-marked pre-release pre-release after upload.
-            echo "prerelease=${{ github.event.release.prerelease }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ inputs.skip_release_upload }}" = "true" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${{ steps.version.outputs.value }}" >> "$GITHUB_OUTPUT"
-            echo "prerelease=${{ steps.version.outputs.prerelease }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if ! gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "${{ github.repository }}" \
+                --title "$TAG" --notes ""
           fi
-
-      - name: Upload to GitHub Release
-        if: steps.upload.outputs.skip != 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.upload.outputs.tag }}
-          name: myosi ${{ steps.upload.outputs.tag }}
-          files: release/*
-          prerelease: ${{ steps.upload.outputs.prerelease }}
-          generate_release_notes: false
+          gh release upload "$TAG" release/* --clobber -R "${{ github.repository }}"
