@@ -1,0 +1,55 @@
+[Unit]
+Description=Compile union GSettings schema cache from merged sysexts
+Documentation=man:glib-compile-schemas(1) man:systemd-sysext(8)
+
+# Slot: multi-user.target, before systemd-user-sessions.service.
+#
+# Rationale:
+#   - systemd-sysext.service merges /usr around sysinit. By the time we
+#     run (after sysinit), /usr/share/glib-2.0/schemas/ shows the
+#     overlay union of every active sysext's XMLs.
+#   - The only consumer of GSETTINGS_SCHEMA_DIR is libglib in user
+#     sessions; environment.d is read by systemd --user when logind
+#     spawns a session, which happens after systemd-user-sessions.service
+#     unblocks logins. We just need to finish before that gate.
+#
+# Avoided traps:
+#   - No DefaultDependencies=no + Before=basic.target: that combination
+#     plus RequiresMountsFor on /usr resolved to early-boot mount units
+#     and closed an ordering cycle through sysinit.target. Verified
+#     failure on externy 2026.06.08.07-rc.1:
+#       basic.target: Found ordering cycle: myosi-glib-schemas-compile
+#       .service/start after basic.target/start - after myosi-glib-schemas
+#       -compile.service
+#       basic.target: Job myosi-glib-schemas-compile.service/start
+#       deleted to break ordering cycle
+#   - No RequiresMountsFor=/usr/share/glib-2.0/schemas: redundant once we
+#     order After=systemd-sysext.service (sysext merge implies /usr is
+#     ready), and the dep on the underlying mount unit was the cycle
+#     source. Drop it.
+#   - WantedBy=multi-user.target instead of basic.target — basic.target
+#     is the pre-services barrier; this work is per-session-prep, not
+#     pre-services. multi-user is the canonical home.
+After=systemd-sysext.service
+Before=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Output dir is on tmpfs (/run) so the cache is rebuilt every boot from
+# whatever sysext set ended up merged this time. Survives sysupdate of
+# any single sysext: the next boot composes a fresh union from the new
+# XML set.
+ExecStartPre=/usr/bin/mkdir -p /run/myosi/glib-schemas/glib-2.0/schemas
+ExecStart=/usr/bin/glib-compile-schemas \
+    --targetdir=/run/myosi/glib-schemas/glib-2.0/schemas \
+    /usr/share/glib-2.0/schemas
+
+# A missing or broken cache must NOT block boot — every GTK app would
+# fall back to safe defaults, which is degraded but not a hang. Log and
+# move on.
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target

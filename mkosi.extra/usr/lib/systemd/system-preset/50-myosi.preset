@@ -1,0 +1,95 @@
+# Main-image unit activation policy. systemctl preset-all runs against
+# this file during mkosi.postinst and writes .wants/ symlinks for each
+# `enable` directive.
+#
+# Activation mechanism is split by image tier — keep each unit in the
+# right tier's source of truth:
+#
+#   * main-image always-present units  → enable here (this file)
+#   * initrd-only units                → static `.wants/` symlink in
+#                                        mkosi.images/initrd/mkosi.extra
+#                                        (preset doesn't reach initrd)
+#   * profile/sysext units             → static `Upholds=` drop-in at
+#                                        mkosi.extra/usr/lib/systemd/
+#                                        {system,user}/<target>.d/
+#                                        50-myosi-<id>.conf with
+#                                        `[Unit] Upholds=<units...>`.
+#                                        Single artifact covers BOTH
+#                                        delivery modes (baked into main
+#                                        AND sysext-merged at runtime):
+#                                        - baked: drop-in lands in main
+#                                          /usr → target Upholds= active
+#                                          at first boot.
+#                                        - sysext: drop-in survives
+#                                          strip_to_sysext_layout (in
+#                                          /usr) → on `systemd-sysext
+#                                          refresh` + EXTENSION_RELOAD_
+#                                          MANAGER=1 daemon-reload,
+#                                          target's Upholds= re-
+#                                          evaluates → unit auto-starts
+#                                          without target restart or
+#                                          reboot.
+#                                        Static `.wants/` symlinks were
+#                                        equivalent at BOOT but failed
+#                                        to auto-start units on runtime
+#                                        sysext refresh — Upholds= has
+#                                        the stronger "ensure running"
+#                                        semantics needed for sysupdate-
+#                                        delivered sysext swaps.
+#                                        No `.preset` file, no postinst
+#                                        sysext_uphold_*/sysext_enable_*
+#                                        calls — fully declarative.
+#
+# A line referencing a unit not in main-image /usr (e.g. an initrd-only
+# service) is silently skipped by preset-all — dead code. Audit before
+# adding.
+
+enable myosi-sysext-relabel.service
+enable myosi-glib-schemas-compile.service
+
+# Homed user provisioning. The template materializes the user record
+# at /usr/share/myosi/users/<instance>.user on first boot and binds
+# the user to groups declared by currently-active sysexts /
+# profile features under /usr/share/myosi/user-groups.d/.
+#
+# IMPORTANT: this `enable` directive is functionally a no-op for the
+# default user — `systemctl preset-all` does NOT honor template-
+# instance enables during the build's postinst (verified empirically
+# on 2026.06.19.04: preset-all walks unit files found on disk, and
+# template units have no concrete instance to enumerate, so the line
+# is silently skipped). The default user instance is enabled via
+# a static `.wants/` symlink shipped from
+# mkosi.extra/usr/lib/systemd/system/multi-user.target.wants/. The
+# line is kept here for documentation + for the operator-side
+# `systemctl preset` path which DOES honor instance lines, so future
+# users added via `homectl` followed by `systemctl preset
+# myosi-homed-user@<name>.service` Just Work.
+#
+# To add a user at build time: drop
+# /usr/share/myosi/users/<name>.user AND ship the matching static
+# wants symlink at
+# mkosi.extra/usr/lib/systemd/system/multi-user.target.wants/myosi-homed-user@<name>.service.
+enable myosi-homed-user@user.service
+
+# No dotfiles repo is shipped in the image, and there is no first-boot
+# seeding into $HOME — homed activates the encrypted home at PAM login
+# (NOT at homectl create), so a build-time copy into /home/<user>/
+# would write to the empty mountpoint and get shadowed when the LUKS
+# image actually mounts. Clone your dotfiles yourself, post-login.
+
+# Explicit mounts for ALL the data partitions / subvolumes we care
+# about. gpt-auto-generator is unreliable on verity-protected myosi
+# installs (fails entirely due to image_policy=:=ignore fallback and
+# root/usr hash lookup quirks in systemd 259), so we own the lifecycle
+# of every post-pivot mount ourselves:
+#   * efi.mount  — ESP at /efi (PARTLABEL=esp)
+#   * var.mount  — /var btrfs subvol on data-luks
+#   * home.mount — /home btrfs subvol on data-luks (sibling subvol,
+#                  not its own DPS partition)
+#   * srv.mount  — /srv btrfs subvol on data-luks (same)
+# Explicit Options= on each unit keeps zstd:3 + noatime regardless of
+# what gpt-auto would have emitted by default.
+enable efi.mount
+enable var.mount
+enable home.mount
+enable srv.mount

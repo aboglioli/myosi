@@ -1,0 +1,13 @@
+[Transfer]
+Features=nvidia
+
+[Source]
+Type=regular-file
+Path=/var/lib/sysupdate
+MatchPattern=nvidia_@v_%a.raw
+
+[Target]
+Type=regular-file
+Path=/var/lib/extensions
+MatchPattern=nvidia_@v_%a.raw
+InstancesMax=2

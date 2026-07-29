@@ -1,0 +1,9 @@
+Fleet SSH baseline keys, baked into the verity-protected /usr.
+sshd reads /usr/share/myosi/ssh/authorized_keys.d/<user> via an
+AuthorizedKeysFile token (sshd_config.d/50-myosi.conf).
+
+The public repo ships NO keys. Provide yours via one of:
+  * a private overlay: mkosi.local.conf ExtraTrees= pointing at a tree
+    that contains usr/share/myosi/ssh/authorized_keys.d/<user>
+  * operator-managed /etc/ssh/authorized_keys.d/<user> on the host
+  * a systemd credential: ssh.authorized_keys.<user>

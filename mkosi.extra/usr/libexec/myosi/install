@@ -1,0 +1,418 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Write a myosi disk image to a block device.
+#
+# The image is a GPT disk. Two flavors ship from the build pipeline; this
+# script accepts either:
+#
+#   full-profile image (~12 GiB raw)    Ships ESP + root A/B + verity A/B +
+#                                       verity-sig A/B + data-luks
+#                                       placeholder. Boots directly; first-
+#                                       boot systemd-repart grows the data
+#                                       partition to fill the target disk.
+#   minimal-profile image (~7 GiB raw)  Ships ESP + root-A + verity-A +
+#                                       verity-sig-A only. First-boot
+#                                       systemd-repart (from the initrd-
+#                                       baked /usr/lib/repart.d/) creates
+#                                       root-B + verity-B + verity-sig-B +
+#                                       data-luks and grows data-luks to
+#                                       fill the target disk. The exact
+#                                       same .raw works as USB live and as
+#                                       installed root.
+#
+# The same operation produces a bootable USB or installs onto an internal
+# disk — the destination is just whichever block device you point at. A
+# booted USB IS the image, so you can also clone it directly onto an
+# internal disk after booting from it.
+#
+# Usage:
+#   install <target> [<source>] [--reset-identity]
+#
+# <target>            Destination block device (e.g. /dev/sda, /dev/nvme0n1).
+#                     Refuses to overwrite the disk the running system
+#                     was booted from.
+# <source>            Optional. Disambiguated by content:
+#                       /dev/...                    → block device, dd-clone
+#                       /path/to/file.raw[.xz|.zst] → file, decompress + dd
+#                       YYYY.MM.DD.NN | latest      → fetch from GitHub
+#                                                     release. Tries gh
+#                                                     CLI first; falls
+#                                                     back to REST API
+#                                                     via curl with a
+#                                                     token (private
+#                                                     repo: needs gh
+#                                                     auth OR a token
+#                                                     in MYOSI_GH_TOKEN
+#                                                     / GH_TOKEN /
+#                                                     GITHUB_TOKEN).
+#                                                     Handles both
+#                                                     single-asset and
+#                                                     split-part
+#                                                     releases
+#                                                     (myosi_<v>_<a>.raw.zst
+#                                                     vs .raw.zst.partNN).
+#                     If omitted, the script searches build/ (repo
+#                     checkout), then standard live-install paths, then
+#                     falls back to cloning the disk the running system
+#                     was booted from. If nothing local matches, falls
+#                     through to fetching the latest GitHub release.
+#
+# --reset-identity    After dd, wipe the data-luks partition header on the
+#                     target so the next boot is treated as a fresh
+#                     install: systemd-repart in initrd formats new
+#                     LUKS2 with the bootstrap key file, fresh btrfs +
+#                     subvolumes, new machine-id, new ssh host keys.
+#                     Operator follow-up post-boot: enroll a real unlock
+#                     method, then wipe the bootstrap key-file slot.
+#                     Example passphrase enrollment:
+#                       sudo cryptsetup luksAddKey \
+#                           --key-file /usr/share/myosi/keys/data.key \
+#                           /dev/disk/by-partlabel/data-luks
+#                     Use this when
+#                     installing onto a PRIMARY disk and you do NOT want
+#                     to inherit the booted live USB's identity.
+#                     Skipped by default for the dev-host write-USB case.
+#
+# Examples:
+#   sudo install /dev/sdb                                # auto-pick
+#   sudo install /dev/sdb build/myosi_VER_ARCH.raw.zst   # explicit file
+#   sudo install /dev/nvme0n1 /dev/sdb                   # clone live USB
+#   sudo install /dev/nvme0n1 latest --reset-identity    # fresh primary install
+#   sudo install /dev/nvme0n1 2026.06.05.03              # pin a version
+
+# Source the shared lib when present (deployed image at
+# /usr/libexec/myosi/lib.sh; same path resolves on dev box because the
+# script lives in mkosi.extra/usr/libexec/myosi/). Falls back to inline
+# minimal stubs if lib.sh is missing (e.g. running the script out of a
+# tarball without the surrounding tree).
+LIBEXEC=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+if [ -f "${LIBEXEC}/lib.sh" ]; then
+    # shellcheck source=/dev/null
+    . "${LIBEXEC}/lib.sh"
+else
+    echo "ERROR: ${LIBEXEC}/lib.sh missing — install script depends on it." >&2
+    exit 1
+fi
+
+REPO="${MYOSI_REPO:-user/myosi}"
+RESET_IDENTITY=0
+TARGET=""
+SOURCE=""
+
+# Two-pass arg scan: flags can appear anywhere. Help handled before root
+# check so non-root can read it.
+for arg in "$@"; do
+    case "$arg" in
+        --reset-identity|--reset) RESET_IDENTITY=1 ;;
+        -h|--help) sed -n 's/^# \?//p' "$0" | head -50; exit 0 ;;
+        *)
+            if [ -z "$TARGET" ]; then
+                TARGET="$arg"
+            elif [ -z "$SOURCE" ]; then
+                SOURCE="$arg"
+            else
+                echo "ERROR: unexpected extra argument '$arg'" >&2
+                exit 2
+            fi
+            ;;
+    esac
+done
+
+if [ -z "$TARGET" ]; then
+    echo "Usage: $0 <target> [<source>] [--reset-identity]" >&2
+    exit 2
+fi
+if [ "$EUID" -ne 0 ]; then
+    echo "ERROR: must run as root" >&2
+    exit 1
+fi
+if [ ! -b "$TARGET" ]; then
+    echo "ERROR: $TARGET is not a block device" >&2
+    exit 3
+fi
+
+LIVE_DISK=$(resolve_boot_disk)
+
+# Refuse to overwrite the disk the running system was booted from.
+if [ -n "$LIVE_DISK" ] && [ "$TARGET" = "$LIVE_DISK" ]; then
+    echo "ERROR: refusing to overwrite the disk you booted from ($TARGET)" >&2
+    exit 4
+fi
+
+# Refuse if the target has any mounted partition.
+if grep -q "^${TARGET}" /proc/mounts; then
+    echo "ERROR: $TARGET has mounted partitions:" >&2
+    grep "^${TARGET}" /proc/mounts >&2
+    exit 5
+fi
+
+# mkosi emits myosi_<calver>_<arch>.<suffix>.raw for every partition
+# (.esp, .root*, .verity*, .linux-generic). Only the file with NO extra
+# suffix between arch and .raw is the full bootable GPT disk. The arch
+# is one of mkosi's %a tokens: x86-64, arm64, ppc64-le, s390x.
+FULL_IMAGE_RE='.*/myosi_[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+_[A-Za-z0-9-]+\.raw(\.xz|\.zst)?$'
+
+pick_image_from() {
+    local dir="$1"
+    [ -d "$dir" ] || return 1
+    local match ext
+    for ext in .xz .zst ""; do
+        match=$(find "$dir" -maxdepth 1 -type f -regextype posix-extended \
+                    -regex "${FULL_IMAGE_RE}" -name "*.raw${ext}" 2>/dev/null \
+                | sort -r | head -1)
+        if [ -n "$match" ]; then
+            echo "$match"
+            return 0
+        fi
+    done
+    return 1
+}
+
+DIRECT_DISK=0
+RELEASE_VERSION=""
+
+classify_explicit_source() {
+    local s="$1"
+    if [ -b "$s" ]; then
+        DIRECT_DISK=1
+        SOURCE="$s"
+        return 0
+    fi
+    if [ -f "$s" ]; then
+        SOURCE="$s"
+        return 0
+    fi
+    if [ "$s" = latest ] || [[ "$s" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}$ ]]; then
+        local resolved
+        resolved=$(resolve_version "$s" "$REPO")
+        if [ -z "$resolved" ]; then
+            echo "ERROR: could not resolve release version '$s'" >&2
+            exit 6
+        fi
+        RELEASE_VERSION="$resolved"
+        SOURCE="github:${REPO}@${resolved}"
+        return 0
+    fi
+    echo "ERROR: source '$s' is not a block device, file, or release version" >&2
+    exit 6
+}
+
+if [ -n "$SOURCE" ]; then
+    classify_explicit_source "$SOURCE"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    # On dev host the script also lives at $REPO/myosi/mkosi.extra/usr/
+    # libexec/myosi/install — walk up to find build/.
+    # (the /run/myosi-installer and /var/lib/myosi/installer paths below
+    # are STAGING dirs for pre-staged release artifacts, not the script
+    # itself; the legacy `installer` name reads fine for a directory
+    # holding installer payloads.)
+    for dir in "${SCRIPT_DIR}/../../../../../build" \
+               "${SCRIPT_DIR}/../../../build" \
+               /run/myosi-installer \
+               /run/installer \
+               /var/lib/myosi/installer; do
+        if SOURCE=$(pick_image_from "$dir"); then
+            break
+        fi
+        SOURCE=""
+    done
+
+    if [ -z "$SOURCE" ] && [ -n "$LIVE_DISK" ] && [ -b "$LIVE_DISK" ] && [ "$LIVE_DISK" != "$TARGET" ]; then
+        echo "No image file found; will clone the live boot disk: $LIVE_DISK"
+        SOURCE="$LIVE_DISK"
+        DIRECT_DISK=1
+    fi
+
+    if [ -z "$SOURCE" ]; then
+        echo "No local image or live source found. Falling back to GitHub release."
+        resolved=$(resolve_version latest "$REPO")
+        if [ -z "$resolved" ]; then
+            echo "ERROR: could not resolve latest release version." >&2
+            echo "       Need either gh authed ('gh auth login --scopes repo')" >&2
+            echo "       OR a token in MYOSI_GH_TOKEN / GH_TOKEN / GITHUB_TOKEN." >&2
+            echo "       Otherwise pre-stage the image:" >&2
+            echo "           /var/lib/myosi/installer/myosi_<VER>_<ARCH>.raw.zst[.part*]" >&2
+            echo "       and re-run, or pass an explicit source:" >&2
+            echo "           $0 $TARGET <file|device|version>" >&2
+            exit 7
+        fi
+        RELEASE_VERSION="$resolved"
+        SOURCE="github:${REPO}@${resolved}"
+    fi
+fi
+
+if [ -n "$RELEASE_VERSION" ]; then
+    DECOMP="zstd -dc"   # release artifacts are always .raw.zst
+elif [ "$DIRECT_DISK" = "1" ]; then
+    DECOMP="cat"
+else
+    case "$SOURCE" in
+        *.xz)  DECOMP="xz -dc";;
+        *.zst) DECOMP="zstd -dc";;
+        *)     DECOMP="cat";;
+    esac
+fi
+
+TARGET_BYTES=$(blockdev --getsize64 "$TARGET")
+if [ -n "$RELEASE_VERSION" ]; then
+    SOURCE_BYTES=0   # unknown until parts are listed; size-check skipped
+elif [ "$DIRECT_DISK" = "1" ]; then
+    SOURCE_BYTES=$(blockdev --getsize64 "$SOURCE")
+elif [[ "$SOURCE" =~ \.(xz|zst)$ ]]; then
+    SOURCE_BYTES=0
+else
+    SOURCE_BYTES=$(stat -c %s "$SOURCE")
+fi
+if [ "$SOURCE_BYTES" -gt 0 ] && [ "$SOURCE_BYTES" -gt "$TARGET_BYTES" ]; then
+    echo "ERROR: target ($((TARGET_BYTES / 1024 / 1024)) MiB) is smaller than" >&2
+    echo "       source ($((SOURCE_BYTES / 1024 / 1024)) MiB)." >&2
+    exit 8
+fi
+
+# For release sources, list the assets up front so we can fail fast
+# before prompting for destructive confirmation.
+RELEASE_PARTS=()
+if [ -n "$RELEASE_VERSION" ]; then
+    echo "Listing release assets for $REPO@$RELEASE_VERSION..."
+    # Match only this host's arch — release shipping multiple arch
+    # streams must not let an arm64 USB get written from an x86-64
+    # asset by accident. ARCH matches mkosi's %a token.
+    ARCH=$(uname -m | sed -e 's/^x86_64$/x86-64/' -e 's/^aarch64$/arm64/')
+    full_image_re="^myosi_${RELEASE_VERSION}_${ARCH}\.raw\.zst(\.part[0-9]+)?$"
+    mapfile -t RELEASE_PARTS < <(
+        list_release_assets "$RELEASE_VERSION" "$REPO" \
+            | grep -E "$full_image_re" \
+            | sort
+    )
+    if [ "${#RELEASE_PARTS[@]}" -eq 0 ]; then
+        echo "ERROR: release $RELEASE_VERSION has no matching disk image asset." >&2
+        echo "       Expected myosi_${RELEASE_VERSION}_${ARCH}.raw.zst[.partNN]." >&2
+        echo "       Either gh is not authed (try 'gh auth login --scopes repo')" >&2
+        echo "       or the API token has no read access to ${REPO}." >&2
+        exit 10
+    fi
+    echo "  Found ${#RELEASE_PARTS[@]} asset(s):"
+    for p in "${RELEASE_PARTS[@]}"; do echo "    $p"; done
+fi
+
+MODEL=$(lsblk -dno MODEL "$TARGET" 2>/dev/null || echo "unknown")
+SERIAL=$(lsblk -dno SERIAL "$TARGET" 2>/dev/null || echo "unknown")
+
+echo
+echo "Writing myosi disk image:"
+echo "  Source : $SOURCE"
+if [ "$SOURCE_BYTES" -gt 0 ]; then
+    echo "           $((SOURCE_BYTES / 1024 / 1024)) MiB"
+fi
+echo "  Target : $TARGET"
+echo "           $((TARGET_BYTES / 1024 / 1024 / 1024)) GiB · $MODEL · $SERIAL"
+if [ "$RESET_IDENTITY" = "1" ]; then
+    echo "  Mode   : --reset-identity (data-luks will be wiped post-clone)"
+fi
+echo
+echo "ALL DATA ON $TARGET WILL BE LOST."
+read -p "Type 'YES' to proceed: " CONFIRM
+if [ "$CONFIRM" != "YES" ]; then
+    echo "Aborted."
+    exit 9
+fi
+
+echo
+echo "Writing..."
+if [ -n "$RELEASE_VERSION" ]; then
+    # Stage assets to a tmp dir, then stream `cat parts | zstd -dc | dd`.
+    # Release assets are either one file (myosi_<VER>_<ARCH>.raw.zst)
+    # or split into 1900M chunks (.part00, .part01, ...) by
+    # the release workflow when the compressed image exceeds the
+    # GitHub per-asset cap. cat in sorted-name order reconstructs the
+    # original zstd stream.
+    STAGE=$(mktemp -d -t myosi-install-XXXXXX)
+    trap 'rm -rf "$STAGE"' EXIT
+    for asset in "${RELEASE_PARTS[@]}"; do
+        echo "  Downloading $asset..."
+        if ! download_release_asset \
+                "$RELEASE_VERSION" "$asset" "$STAGE/$asset" "$REPO"; then
+            echo "ERROR: failed to download $asset" >&2
+            exit 11
+        fi
+    done
+    staged_paths=()
+    for asset in "${RELEASE_PARTS[@]}"; do
+        staged_paths+=("$STAGE/$asset")
+    done
+    cat -- "${staged_paths[@]}" \
+        | $DECOMP \
+        | dd of="$TARGET" bs=4M iflag=fullblock status=progress oflag=direct conv=fsync
+elif [ "$DIRECT_DISK" = "1" ]; then
+    dd if="$SOURCE" of="$TARGET" bs=4M status=progress oflag=direct conv=fsync
+else
+    $DECOMP "$SOURCE" | dd of="$TARGET" bs=4M iflag=fullblock status=progress oflag=direct conv=fsync
+fi
+sync
+
+echo
+echo "Re-reading partition table on $TARGET..."
+partprobe "$TARGET" 2>/dev/null || true
+udevadm settle 2>/dev/null || true
+
+# Identity wipe: blow away the data-luks header so systemd-repart on
+# first boot of the target sees an unformatted partition, runs LUKS2
+# format with the bootstrap key file, and rebuilds the btrfs + subvolumes
+# (which also wipes machine-id, ssh host keys, etc.).
+# Operator follow-up post-boot: enroll a passphrase keyslot with
+#   sudo cryptsetup luksAddKey --key-file /usr/share/myosi/keys/data.key \
+#       /dev/disk/by-partlabel/data-luks
+if [ "$RESET_IDENTITY" = "1" ]; then
+    echo
+    echo "Resetting identity: wiping data-luks header on $TARGET..."
+    data_part_num=$(sgdisk -p "$TARGET" 2>/dev/null \
+        | awk '$NF=="data-luks"{print $1; exit}')
+    if [ -z "$data_part_num" ]; then
+        echo "WARN: could not locate data-luks partition on $TARGET — skipping identity reset" >&2
+    else
+        # /dev/nvme0n1 → /dev/nvme0n1p8 ; /dev/sda → /dev/sda8 ; loopN → loopNpN
+        case "$TARGET" in
+            *[0-9]) data_part="${TARGET}p${data_part_num}" ;;
+            *)      data_part="${TARGET}${data_part_num}" ;;
+        esac
+        if [ -b "$data_part" ]; then
+            wipefs -a "$data_part" 2>&1 | sed 's/^/  /'
+            # Belt-and-suspenders: zero the first 16 MiB so any luks2
+            # tertiary header and the btrfs superblock are unambiguously
+            # gone.
+            dd if=/dev/zero of="$data_part" bs=1M count=16 conv=fsync status=none 2>/dev/null || true
+            echo "  Wiped $data_part"
+        else
+            echo "WARN: expected partition $data_part not present — skipping" >&2
+        fi
+        partprobe "$TARGET" 2>/dev/null || true
+        udevadm settle 2>/dev/null || true
+    fi
+fi
+
+echo
+echo "Done. $TARGET now contains the myosi disk image."
+echo
+echo "Next steps:"
+echo "  - Boot USB: remove $TARGET, plug into target hardware, boot."
+echo "  - Internal disk: reboot, remove the USB, system boots from $TARGET."
+echo "    First boot:"
+echo "      1. Log in as 'user' / 'changeme'. Change it: 'passwd'."
+echo "         data-luks unlocks via the embedded bootstrap key; no boot-time prompt."
+echo "      2. Enroll a real LUKS passphrase, then wipe bootstrap slot 0:"
+echo "             sudo cryptsetup luksAddKey \\"
+echo "                 --key-file /usr/share/myosi/keys/data.key \\"
+echo "                 /dev/disk/by-partlabel/data-luks"
+echo "             sudo cryptsetup luksKillSlot /dev/disk/by-partlabel/data-luks 0"
+echo "         Optional TPM2 afterwards: systemd-cryptenroll --tpm2-device=auto ..."
+echo "      3. Set hostname:"
+echo "             sudo hostnamectl hostname <yourhost>"
+echo "      4. Enable sysexts as needed:"
+echo "             sudo myosi extension-enable firmware"
+echo "             sudo myosi extension-enable containers"
+echo "             sudo myosi extension-enable desktop"
+echo "             sudo myosi extension-enable virt"
+echo "      5. Update to latest release any time:"
+echo "             sudo myosi run"

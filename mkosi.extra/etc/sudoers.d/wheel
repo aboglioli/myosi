@@ -1,0 +1,4 @@
+%wheel ALL=(ALL) ALL
+Defaults timestamp_timeout=15
+Defaults env_reset
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"

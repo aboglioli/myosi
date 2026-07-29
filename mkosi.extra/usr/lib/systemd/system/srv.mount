@@ -1,0 +1,18 @@
+[Unit]
+Description=/srv (btrfs subvolume on data-luks)
+Documentation=https://github.com/aboglioli/myosi/blob/main/README.md
+# Bind to the dm-mapper device, not var.mount — see home.mount for
+# the rationale. Same data-luks btrfs underneath; same subvol-mount
+# pattern; same lifecycle.
+After=dev-mapper-data.device
+BindsTo=dev-mapper-data.device
+Before=local-fs.target
+
+[Mount]
+What=/dev/mapper/data
+Where=/srv
+Type=btrfs
+Options=defaults,noatime,compress=zstd:3,subvol=/srv
+
+[Install]
+WantedBy=local-fs.target

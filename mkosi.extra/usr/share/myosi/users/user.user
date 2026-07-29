@@ -1,0 +1,18 @@
+{
+    "userName": "user",
+    "uid": 1000,
+    "gid": 1000,
+    "realName": "myosi user",
+    "homeDirectory": "/home/user",
+    "shell": "/usr/bin/fish",
+    "memberOf": [
+        "wheel",
+        "video",
+        "render",
+        "input",
+        "kvm"
+    ],
+    "preferredLanguage": "en_US.UTF-8",
+    "service": "io.systemd.Home",
+    "enforcePasswordPolicy": false
+}

@@ -1,0 +1,30 @@
+[Unit]
+Description=/var (btrfs subvolume on data-luks)
+Documentation=https://github.com/aboglioli/myosi/blob/main/README.md
+# Explicit /var mount, same shape as home.mount and srv.mount.
+# Shadows the systemd-gpt-auto-generated var.mount (which would
+# otherwise mount /dev/mapper/data with btrfs defaults — no
+# compression, no noatime, relying on btrfs's DefaultSubvolume
+# metadata for the /var subvol selection instead of explicit
+# subvol=/var). Explicit Options= keep /var's btrfs flags identical
+# to the sibling subvolumes (compress=zstd:3 matters here — /var/log
+# /var/cache /var/lib/containers all benefit).
+#
+# Bind to the dm-mapper device itself, not initrd-inherited mount
+# state. The actual precondition is /dev/mapper/data existing;
+# BindsTo= makes var.mount tear down cleanly if the mapper goes away.
+# Same lifecycle as home.mount + srv.mount.
+After=dev-mapper-data.device
+BindsTo=dev-mapper-data.device
+# Mounted before local-fs.target so anything ordered After=local-fs
+# (journald, tmpfiles-setup, etc.) sees /var ready.
+Before=local-fs.target
+
+[Mount]
+What=/dev/mapper/data
+Where=/var
+Type=btrfs
+Options=defaults,noatime,compress=zstd:3,subvol=/var
+
+[Install]
+WantedBy=local-fs.target

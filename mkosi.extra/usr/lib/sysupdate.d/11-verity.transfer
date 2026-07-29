@@ -1,0 +1,19 @@
+[Transfer]
+ProtectVersion=%A
+
+[Source]
+Type=regular-file
+Path=/var/lib/sysupdate
+# `@u` captures the GPT PartitionUUID for the verity hash partition
+# — the LAST 16 bytes of the dm-verity root hash rendered as a UUID
+# (per the Discoverable Partitions Spec). Same rationale as
+# 10-root.transfer: without this capture the kernel cmdline's
+# roothash-derived PARTUUID lookup fails after a sysupdate run and
+# initrd times out at `dev-mapper-root.device`.
+MatchPattern=myosi_@v_%a_@u.verity.raw.zst
+
+[Target]
+Type=partition
+Path=auto
+MatchPattern=root-@v-verity
+MatchPartitionType=root-verity

@@ -1,0 +1,42 @@
+# Enable / disable Fedora-shipped systemd units that myosi opts into.
+#
+# Preset ordering rule: systemd reads *.preset files lexicographically
+# and the FIRST matching line for a given unit wins. The file numbering
+# is:
+#
+#   40-myosi-fedora.preset    this file — Fedora units myosi explicitly
+#                             enables or disables. Lower number = wins.
+#   50-myosi.preset           myosi-* services policy (relabel, depmod,
+#                             schemas, sysusers-after-sysext, etc.).
+#   99-default-disable.preset shipped by base-tree — catch-all
+#                             `disable *` so anything not matched above
+#                             stays off. Without this file, every
+#                             package's `[Install] WantedBy=` would
+#                             flip the service on by default.
+#
+# Replaces the imperative `systemctl enable / disable` block that
+# previously lived in mkosi.postinst §2 + §3.
+
+# Network + remote access
+enable sshd.service
+enable firewalld.service
+enable NetworkManager.service
+enable systemd-resolved.service
+
+# Sysext + UKI boot bookkeeping
+enable systemd-sysext.service
+enable systemd-bless-boot.service
+
+# User management: systemd-homed owns interactive users. Declarative
+# user records ship as systemd credentials at /etc/credstore/home.create.<name>;
+# systemd-homed consumes them on first start, creates the LUKS-backed
+# home, then ignores the credential on subsequent boots (record already
+# exists). systemd-userdbd is the NSS bridge that exposes homed-managed
+# users + homed-created primary groups so `getent passwd|group` resolves
+# them.
+enable systemd-homed.service
+enable systemd-userdbd.service
+
+# bootc's auto-update mechanism conflicts with our sysupdate-driven
+# UKI rollover. Off explicitly.
+disable bootc-fetch-apply-updates.timer

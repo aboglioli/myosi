@@ -1,0 +1,24 @@
+# Auto-select optimal blk-mq scheduler per device class.
+# kyber: SSD/NVMe (multi-queue, low latency)
+# bfq:   HDD/SD (fair, prevents starvation)
+# mq-deadline: virtio block (VM guest disks)
+#
+# Loop and ram devices are deliberately excluded — they expose no
+# queue/scheduler sysfs attribute, so any ATTR{queue/scheduler}=
+# assignment logs "Could not chase sysfs attribute" once per add|change
+# event. Real disks only.
+
+# SSDs
+ACTION=="add|change", KERNEL=="sd[a-z]*", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="kyber"
+# NVMe
+ACTION=="add|change", KERNEL=="nvme[0-9]*n[0-9]*", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="kyber"
+# eMMC SSD
+ACTION=="add|change", KERNEL=="mmcblk[0-9]*", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="kyber"
+
+# HDDs
+ACTION=="add|change", KERNEL=="sd[a-z]*", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"
+# SD cards
+ACTION=="add|change", KERNEL=="mmcblk[0-9]*", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"
+
+# Guest virtio disks
+ACTION=="add|change", KERNEL=="vd[a-z]*", ATTR{queue/scheduler}="mq-deadline"

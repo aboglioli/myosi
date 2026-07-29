@@ -1,0 +1,14 @@
+[Transfer]
+
+[Source]
+Type=regular-file
+Path=/var/lib/sysupdate
+MatchPattern=myosi_@v_%a.efi
+
+[Target]
+Type=regular-file
+Path=/efi/EFI/Linux
+MatchPattern=myosi_@v_%a.efi
+TriesLeft=3
+TriesDone=0
+InstancesMax=2

@@ -1,0 +1,33 @@
+[Transfer]
+ProtectVersion=%A
+
+[Source]
+Type=regular-file
+Path=/var/lib/sysupdate
+# The source filename embeds the GPT PartitionUUID via the `@u`
+# wildcard. The first 16 bytes of the dm-verity root hash are
+# rendered as a UUID and inserted in the filename; sysupdate
+# captures them and writes them into the GPT entry of the
+# destination partition.
+#
+# This is mandatory for the systemd-veritysetup-generator chain:
+# it derives the expected PARTUUID for the root partition from
+# `roothash=` on the kernel cmdline (per the Discoverable
+# Partitions Spec) and looks up `/dev/disk/by-partuuid/<derived>`.
+# Without the @u capture sysupdate leaves the original placeholder
+# PARTUUID in place after writing the new content; the kernel
+# can't find the partition and initrd times out at
+# `dev-mapper-root.device`, dropping to emergency.
+# %a expands to the host's architecture (x86-64 on x86_64, arm64 on
+# aarch64). The release pipeline names every artifact with the matching
+# Output=%i_%v_%a, so the cross-arch lookup is a no-op on single-arch
+# hosts and trivially correct on a future arm64 host.
+MatchPattern=myosi_@v_%a_@u.root.raw.zst
+
+[Target]
+Type=partition
+Path=auto
+MatchPattern=root-@v
+MatchPartitionType=root
+PartitionFlags=0
+ReadOnly=1

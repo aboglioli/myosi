@@ -1,0 +1,8 @@
+NAME="myosi"
+PRETTY_NAME="myosi (Fedora 44 base)"
+ID=myosi
+ID_LIKE=fedora
+VERSION_ID=44
+VARIANT_ID=myosi
+ANSI_COLOR="0;38;2;60;110;180"
+HOME_URL="https://github.com/aboglioli/myosi"

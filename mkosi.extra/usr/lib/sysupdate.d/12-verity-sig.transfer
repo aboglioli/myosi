@@ -1,0 +1,21 @@
+[Transfer]
+# ProtectVersion=%A symmetry with 10-root.transfer and 11-verity.transfer.
+# Without it, sysupdate is free to overwrite the currently-ACTIVE
+# verity-sig partition when picking a slot to install the new version
+# — root + verity protect the active slot, but the sig was previously
+# unguarded. If sysupdate ever races between A/B selection passes (e.g.
+# operator-driven re-apply of the same version), an unprotected sig
+# slot could be overwritten while the kernel still has it pinned for
+# the running root, leading to a verify failure on the next boot.
+ProtectVersion=%A
+
+[Source]
+Type=regular-file
+Path=/var/lib/sysupdate
+MatchPattern=myosi_@v_%a.verity-sig.raw.zst
+
+[Target]
+Type=partition
+Path=auto
+MatchPattern=root-@v-verity-sig
+MatchPartitionType=root-verity-sig

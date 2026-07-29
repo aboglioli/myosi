@@ -1,0 +1,51 @@
+[Transfer]
+# Opt-in mybox nspawn DDI update. mybox is the sealed verity-erofs
+# container image deployed at /var/lib/machines/mybox.raw (started via
+# machinectl). The whole .raw is shipped as one regular file — see
+# mkosi.images/mybox/mkosi.conf, [Output] block — so this transfer
+# replaces the file wholesale rather than coordinating three split
+# partition writes.
+#
+# Why a dedicated sysupdate.machines.d/ directory instead of dropping
+# the transfer into sysupdate.extensions.d/: sysexts merge into the
+# host's /usr via systemd-sysext.service (post-update step is
+# `systemctl restart systemd-sysext.service`). mybox is a separate
+# machine namespace — post-update step is `machinectl stop mybox &&
+# machinectl start mybox` (or a scheduled restart). Different verb,
+# different state machine. Splitting the .d/ prefix keeps the just
+# update recipes from running sysext refresh on machine targets.
+#
+# Feature gate keeps mybox off by default. Operators on hosts that
+# actually run the container drop a /etc/sysupdate.machines.d/
+# mybox.feature.d/enable.conf override (or call
+# `sudo myosi machine-enable mybox` once that recipe lands).
+Features=mybox
+
+[Source]
+# Cached artifacts populated by `myosi fetch` from the GitHub release.
+# The just recipe downloads mybox_<VER>_<ARCH>.raw from the release
+# assets into /var/lib/sysupdate and sysupdate matches the @v wildcard
+# against the filename to pick the version to apply.
+#
+# Per-architecture filename. %a is systemd's standard specifier for
+# native architecture — x86-64 on x86_64, arm64 on aarch64 — and it's
+# the same token mkosi's Output=%i_%v_%a stamps onto the build
+# artifact in mkosi.images/mybox/mkosi.conf, so the lookup stays
+# consistent across hosts of either arch.
+Type=regular-file
+Path=/var/lib/sysupdate
+MatchPattern=mybox_@v_%a.raw
+
+[Target]
+# Install as /var/lib/machines/mybox_<VER>.raw. The version is
+# preserved in the filename so sysupdate can keep multiple instances
+# side by side for rollback (InstancesMax=2 below). machinectl can
+# start `mybox_<VER>` directly, OR operators may symlink
+# /var/lib/machines/mybox.raw to the desired version for the stable
+# `machinectl start mybox` invocation. CurrentSymlink= isn't used
+# here because operators may want to validate a new mybox by booting
+# it under an instance name before retargeting the symlink.
+Type=regular-file
+Path=/var/lib/machines
+MatchPattern=mybox_@v.raw
+InstancesMax=2
