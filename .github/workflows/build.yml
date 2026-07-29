@@ -323,21 +323,12 @@ jobs:
           # sub-image sets Output=%i_%v_%a, so artifact basenames are
           # <name>_<VER>_<ARCH>.raw* — pick up only the host arch.
           #
-          # Skip list:
-          #   - base-tree: Format=directory, internal BaseTrees= source
-          #     for every sysext + mybox. No .raw produced.
-          #   - myosi-initrd-extras: historical placeholder, no release
-          #     artifact ever emitted.
-          #   - fleet-keys: baked into the main image at
-          #     /usr/share/myosi/extensions/ by mkosi.shared/
-          #     finalize-common.sh. No sysupdate.extensions.d/ transfer
-          #     references it, so the standalone copy would never be
-          #     fetched by `myosi update`. Shipping it would just create
-          #     dead release weight.
+          # Skip base-tree: Format=directory, internal BaseTrees=
+          # source for every sysext + mybox — no .raw produced.
           for d in mkosi.images/*/; do
             name=$(basename "$d")
             case "$name" in
-              base-tree|myosi-initrd-extras|fleet-keys) continue ;;
+              base-tree) continue ;;
             esac
             for f in build/${name}_${VER}_${ARCH}.raw*; do
               if [ -f "$f" ] && [ ! -L "$f" ]; then cp "$f" "$GITHUB_WORKSPACE/release/"; fi

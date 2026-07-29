@@ -6,15 +6,11 @@ set -euo pipefail
 # key material source determines whether a build is local or release-signed.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Keys always land in myosi/keys/ regardless of where this script lives.
-# When this script lived at myosi/ci/lib/decode-keys.sh, `../..` resolved
-# to myosi/ (correct). After the move to myosi/scripts/decode-keys.sh,
-# the same `../..` now resolves to the repo root (one level too high) —
-# the CI build for 2026.06.07.03 aborted with
-#   Failed to load X.509 certificate from /keys/image.crt: No such file
-# because mkosi reads keys at myosi/keys/ and the keys had landed at
-# <repo>/keys/ instead. Compute DST as one step up from this script's
-# own dir, mkdir before resolving so `cd` succeeds on first run.
+# Keys land at <repo>/keys/ — exactly ONE level up from this script's
+# dir. mkosi reads keys/ relative to the project root; a wrong level
+# here aborts the build at cert validation (ci/test-update-model.sh
+# asserts the pattern). mkdir before resolving so `cd` succeeds on
+# first run.
 DST="${SCRIPT_DIR}/../keys"
 mkdir -p "$DST"
 chmod 700 "$DST"

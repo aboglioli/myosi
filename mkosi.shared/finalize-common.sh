@@ -55,7 +55,7 @@ fi
 # /usr/share/myosi/extensions/ here. fleet-keys was moved to the base
 # image's plain mkosi.extra (one tiny authorized_keys file — overkill
 # to ship as a verity sysext) — see
-# mkosi.extra/usr/share/myosi/ssh/authorized_keys.d/user.
+# mkosi.extra/usr/share/myosi/ssh/authorized_keys.d/ (README there).
 #
 # Sysext infrastructure stays in place for future baselines (firmware,
 # fleet-keys-style rotations, profile-specific overlays):

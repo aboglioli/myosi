@@ -147,6 +147,17 @@ nspawn:
 clean:
     mkosi clean
 
+# Run the tree-consistency test suite (ci/*.sh — pure file checks).
+test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rc=0
+    for t in ci/test-*.sh; do
+        echo "== $t"
+        bash "$t" || rc=1
+    done
+    exit $rc
+
 # Write the myosi disk image to a block device (USB stick OR internal disk).
 # Same operation either way — the image is a full GPT disk.
 #

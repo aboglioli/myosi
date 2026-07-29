@@ -86,7 +86,6 @@ Slot sizes are pinned (`SizeMinBytes=SizeMaxBytes`) so systemd-repart's build an
 | `nvidia-580xx_VERSION_ARCH.raw` | Sysext: NVIDIA `580xx` legacy proprietary modules (Maxwell / Pascal / Volta — GTX 9xx/10xx, Titan V). All `nvidia*.ko` signed with `boot.key`. |
 | `zfs_VERSION_ARCH.raw` | Sysext: OpenZFS (`zfs-2.4.2` today) — `zfs.ko` + `spl.ko` signed with `boot.key`, plus userspace (`zfs`, `zpool`, `zed`, libraries, `zfs-dracut`, `python3-pyzfs`). Built from the upstream tarball, no RPMFusion / zfsonlinux.org repo dependency. |
 | `mybox_VERSION_ARCH.raw` | Sealed verity-erofs nspawn DDI. Drop into `/var/lib/machines/`, start via `machinectl start mybox`. Optional, opt-in via `myosi machine-enable mybox`. |
-| `fleet-keys_VERSION_ARCH.raw` | Sysext: SSH `authorized_keys` for fleet-wide mutual access. Ships its payload at `/usr/share/myosi/ssh/authorized_keys.d/user`; sshd reads it via an `AuthorizedKeysFile` token in `sshd_config.d/50-myosi.conf`. Also baked into the verity-protected root at `/usr/lib/extensions/` so a fresh install has SSH from first boot; sysupdate writes rotations to `/var/lib/extensions/` and the higher version wins precedence. |
 
 Each `*_VERSION_ARCH.raw` sysext carries verity + signature partitions. Every kernel module shipped in those sysexts is signed against `boot.key` so `module.sig_enforce=1` in the UKI cmdline accepts them when the kernel `.platform` keyring has `boot.crt` enrolled (UEFI db on qemu, MOK on hardware).
 
@@ -109,8 +108,7 @@ myosi/
 │   ├── containers/          # podman/distrobox/compose/skopeo/incus sysext
 │   ├── nvidia/              # 595.x driver sysext (Turing+, open kmod)
 │   ├── nvidia-580xx/        # 580.x driver sysext (Pascal/Maxwell/Volta, proprietary)
-│   ├── zfs/                 # OpenZFS sysext (built from upstream tarball)
-│   └── fleet-keys/          # SSH authorized_keys sysext (baked into base + rotates via sysupdate)
+│   └── zfs/                 # OpenZFS sysext (built from upstream tarball)
 ├── mkosi.shared/            # shared sub-image config + build helpers
 │   ├── sysext.conf          # symlinked as mkosi.conf.d/00-shared.conf in each sysext
 │   ├── sysext-build.sh      # atoms: stage_sysext_policy, strip_to_sysext_layout
@@ -147,7 +145,7 @@ files referenced; this is the operator/contributor map.
 |------|---------|---------------------|
 | `/usr` | Verity-erofs root (signed, dm-verity protected). Sysexts merge on top via overlayfs at boot. | Read-only at runtime. Updated atomically by `sysupdate` swapping the A/B slot. |
 | `/usr/share/myosi/` | All myosi-shipped data: signing keys, version metadata, baseline sysext images, fleet SSH keys. Verity-immutable. | Image-coupled. Changes atomically with each image upgrade. |
-| `/usr/share/myosi/extensions/` | Baseline sysext `.raw` files that ship inside the image (fleet-keys today; can host more). NOT a path systemd-sysext discovers from — see below. | Image-coupled. |
+| `/usr/share/myosi/extensions/` | Baseline sysext `.raw` files that ship inside the image (none currently; infrastructure kept for future baselines). NOT a path systemd-sysext discovers from — see below. | Image-coupled. |
 | `/usr/lib/extensions/` | Documented by systemd as a sysext location but in practice systemd-sysext does NOT scan it for discovery on F44 / systemd 259. Do not bake new sysexts here. | (avoid) |
 | `/etc` | Persistent btrfs subvolume on `data-luks` (`/dev/mapper/data` `subvol=/etc`). Seeded from the verity-baked `/usr/share/factory/etc` factory tree on first boot by `myosi-etc-seed.service` (initrd; `cp -a --reflink=auto /sysroot/usr/share/factory/etc/. /sysroot/etc/` + `setfattr etc_t /sysroot/etc`). Every write lands directly in the subvol and persists across image upgrades. | Operator-mutable. |
 | `/usr/share/factory/etc/` | The verity-baked factory `/etc` tree. `mkosi.finalize` snapshots the build-settled `/etc` here then wipes the sealed-root `/etc` mountpoint. Read by `myosi-etc-seed.service` only on first boot — once the subvol is populated, new files added to `/usr/share/factory/etc` in later images are NOT auto-merged into `/etc` (operator owns `/etc` after first boot, bootc/ostree-style). Use `diff -ruN /etc /usr/share/factory/etc` to spot drift after upgrades. | Image-coupled. |
@@ -633,7 +631,7 @@ blocks 5-10 min on slow CPUs / emulated TPM during LUKS format.
 |------|------------------------|-------|
 | `/etc/shadow` `root` | locked (`!locked`) — no password | Console login as root refused until operator sets one |
 | `/etc/ssh/sshd_config.d/50-myosi.conf` | `PermitRootLogin prohibit-password` | Root SSH allowed via publickey only — no password method |
-| `fleet-keys` sysext | ships authorized_keys for `user`, not `root` | Root SSH won't work in prod until a root authorized_keys file is added to fleet-keys |
+| baked authorized_keys | typically provisioned for `user`, not `root` | Root SSH won't work in prod until a root key is shipped (overlay, `/etc` drop-in, or credential) |
 | `user` | created by homed (subvol), `changeme` password, all fleet keys | Default login path on every host |
 
 So out of the box, only **user** can log in (SSH publickey via
@@ -688,9 +686,10 @@ out to a plain subvol (same deactivate-first requirement).
 
 **Alternative: two-host upgrade (preferred if you have a second box):**
 
-Faster, doesn't need a console. Requires a fleet-keys file for `root`
-shipped at
-`mkosi.images/fleet-keys/mkosi.extra/usr/share/myosi/ssh/authorized_keys.d/root`.
+Faster, doesn't need a console. Requires root SSH access: ship a root
+key at `/etc/ssh/authorized_keys.d/root`, via the
+`ssh.authorized_keys.root` systemd credential, or in a private
+`usr/share/myosi/ssh/authorized_keys.d/root` overlay.
 
 ```bash
 # from a laptop with one of the root fleet keys:
@@ -1684,7 +1683,7 @@ Hashes are baked into `mkosi.extra/etc/shadow` (sha-512 + deterministic salt for
 
 **SSH:**
 - Key-only (`PasswordAuthentication no`)
-- Authorized keys shipped via the `fleet-keys` sysext at `/usr/share/myosi/ssh/authorized_keys.d/user`; sshd reads it through an `AuthorizedKeysFile` token in `sshd_config.d/50-myosi.conf`. Operator-managed local additions still go under `/etc/ssh/authorized_keys.d/<user>`.
+- No authorized keys ship in the public image. sshd reads four sources (`sshd_config.d/50-myosi.conf`): `~/.ssh/authorized_keys`, operator-managed `/etc/ssh/authorized_keys.d/<user>`, a baked `/usr/share/myosi/ssh/authorized_keys.d/<user>` (provide via private `mkosi.local.conf` `ExtraTrees=` overlay), and the `ssh.authorized_keys.<user>` systemd credential.
 - Modern crypto only (curve25519, chacha20-poly1305, ed25519, no diffie-hellman-group14)
 - `MaxAuthTries 3`, `LoginGraceTime 60`, no X11/UserEnv/UserRC
 
@@ -1990,7 +1989,7 @@ Intentional. `myosi` is an atomic, signed OS — installing arbitrary user-space
 | **v1.3: signed kernel modules + module blacklist on UKI cmdline** | ✅ done — every `nvidia*.ko` / `zfs.ko` / `spl.ko` signed with `boot.key`; `module_blacklist=` baked into UKI cmdline as the single canonical blacklist source. |
 | **v1.4: NVIDIA sysexts working** | ✅ done — both `nvidia` (595.x open, Turing+) and `nvidia-580xx` (580.x proprietary, Pascal/Maxwell/Volta) build cleanly against kernel 7.0.10. Root cause was missing `/dev` + `/proc` in mkosi sandbox chroot, fixed via `mkosi.shared/kmod-build.sh`. |
 | **v1.5: OpenZFS sysext via upstream tarball** | ✅ done — `zfs-build.sh` pulls `zfs-${ZFS_VERSION}.tar.gz`, generates SRPMs with `make srpm-utils srpm-kmod`, rebuilds via `kmod_exec rpmbuild`, signs `zfs.ko` + `spl.ko`. No dependency on zfsonlinux.org/fedora packaging that lags new Fedora releases. |
-| **v1.6: fleet-keys sysext baked into base** | ✅ done — `/usr/lib/extensions/fleet-keys_VER_ARCH.raw` ships in the verity-protected root for first-boot SSH; sysupdate rotations land in `/var/lib/extensions/` and win precedence. Originally shipped as a confext; reworked as a sysext that drops `authorized_keys` under `/usr/share/myosi/ssh/authorized_keys.d/` and is read by sshd via an `AuthorizedKeysFile` token. |
+| **v1.6: fleet-keys sysext baked into base** | ✅ done (since retired — the public repo ships no keys; see SSH hardening section) — `/usr/lib/extensions/fleet-keys_VER_ARCH.raw` ships in the verity-protected root for first-boot SSH; sysupdate rotations land in `/var/lib/extensions/` and win precedence. Originally shipped as a confext; reworked as a sysext that drops `authorized_keys` under `/usr/share/myosi/ssh/authorized_keys.d/` and is read by sshd via an `AuthorizedKeysFile` token. |
 | **v1.7: prerelease versioning + bare tags** | ✅ done — `YYYY.MM.DD.NN` for stable, `-rc.N` / `-beta.N` / `-alpha.N` for prereleases. No `v` prefix anywhere — filenames + tags identical. CI workflow `prerelease` input validates `(alpha|beta|rc)\.N`. |
 | **v1.8: locked root + bootstrap via user sudo** | ✅ done — root ships `!locked` in shadow; user has `changeme`. First-login `sudo passwd root` sets a real root password. Image never ships a known root credential. |
 | **v1.9: incremental build mode** | ✅ done — `just build` runs `mkosi -fi` for fast local iteration; `just build full` runs `mkosi -ff` for clean releases; CI workflow pinned to full. |

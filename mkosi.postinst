@@ -20,7 +20,7 @@
 #       /usr/lib/sysusers.d/myosi-groups.conf; root locked in
 #       /etc/shadow, unlocked via `sudo passwd root` after first SSH
 #       publickey login via the fleet authorized_keys file at
-#       /usr/share/myosi/ssh/authorized_keys.d/user (baked into
+#       /usr/share/myosi/ssh/authorized_keys.d/<user> (baked into
 #       the base image's mkosi.extra/, no longer shipped as a sysext).
 #
 #   §4  Firewalld base config ships statically via mkosi.extra/ instead

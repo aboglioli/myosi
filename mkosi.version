@@ -48,14 +48,7 @@ if [[ "$TAG" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$ ]]; then
     exit 0
 fi
 
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-# Determine MYOSI_ROOT — standalone repo: git toplevel IS the myosi root;
-# keep the subdir fallback for monorepo checkouts.
-if [ -d "$REPO_ROOT/myosi" ]; then
-    MYOSI_ROOT="$REPO_ROOT/myosi"
-else
-    MYOSI_ROOT="$REPO_ROOT"
-fi
+MYOSI_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 BUILD_DIR="$MYOSI_ROOT/build"
 mkdir -p "$BUILD_DIR"
 
