@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Select which sysext version is visible to systemd-sysext. Two sources:
+# verity-baked baselines (/usr/share/myosi/extensions/) and the sysupdate
+# store (/var/lib/myosi/extensions/, versioned raws, InstancesMax=2).
+# systemd-sysext merges EVERY image it discovers — no version selection —
+# so the store stays outside its scan paths and this script links exactly
+# ONE version per sysext into /var/lib/extensions/: the one matching the
+# booted image's IMAGE_VERSION, falling back to the newest present. That
+# couples sysexts to the A/B slot: booting the old root selects the old
+# sysext, booting the new root the new one. Symlinks keep the versioned
+# basename so the image's extension-release.<name>_<ver>_<arch> file
+# matches strictly. Manages SYMLINKS into the two source dirs only —
+# operator-dropped regular files are never touched and suppress selection
+# for that sysext name. Idempotent (sysext ExecStartPre, every boot and
+# every refresh).
+
+set -euo pipefail
+
+BAKED_DIR=/usr/share/myosi/extensions
+STORE_DIR=/var/lib/myosi/extensions
+TGT_DIR=/var/lib/extensions
+
+mkdir -p "$TGT_DIR"
+
+IMAGE_VERSION=""
+for f in /usr/lib/os-release /etc/os-release; do
+    [ -f "$f" ] || continue
+    IMAGE_VERSION=$(awk -F= '$1=="IMAGE_VERSION"{v=$2;gsub(/^"|"$/,"",v);print v;exit}' "$f")
+    [ -n "$IMAGE_VERSION" ] && break
+done
+
+# <name>_<VERSION>_<ARCH>.raw → name / version (arch is the last "_"
+# component, version the second-to-last; names may carry hyphens but
+# never underscores).
+extract_name() {
+    local fn=${1##*/}; fn=${fn%.raw}; fn=${fn%_*}
+    echo "${fn%_*}"
+}
+extract_version() {
+    local fn=${1##*/}; fn=${fn%.raw}; fn=${fn%_*}
+    echo "${fn##*_}"
+}
+
+shopt -s nullglob
+
+# Pick one source file per sysext name: exact IMAGE_VERSION match wins,
+# otherwise the highest version present (sort -V), with a warning — a
+# version-mismatched kmod sysext will not load against the booted kernel.
+declare -A selected
+declare -A best_version
+for src in "$BAKED_DIR"/*.raw "$STORE_DIR"/*.raw; do
+    name=$(extract_name "$src")
+    version=$(extract_version "$src")
+    if [ "$version" = "$IMAGE_VERSION" ]; then
+        selected[$name]=$src
+        best_version[$name]=$version
+        continue
+    fi
+    [ "${best_version[$name]:-}" = "$IMAGE_VERSION" ] && continue
+    if [ -z "${selected[$name]:-}" ] || \
+       [ "$(printf '%s\n%s\n' "${best_version[$name]}" "$version" | sort -V | tail -1)" = "$version" ]; then
+        selected[$name]=$src
+        best_version[$name]=$version
+    fi
+done
+
+for name in "${!selected[@]}"; do
+    if [ -n "$IMAGE_VERSION" ] && [ "${best_version[$name]}" != "$IMAGE_VERSION" ]; then
+        echo "sysext-select: WARNING no ${name} build for image ${IMAGE_VERSION}, selecting ${best_version[$name]}" >&2
+    fi
+done
+
+# Operator regular files override selection for their sysext name — a
+# managed symlink NEXT to an operator raw would merge both versions.
+for tgt in "$TGT_DIR"/*.raw; do
+    [ -L "$tgt" ] && continue
+    name=$(extract_name "$tgt")
+    if [ -n "${selected[$name]:-}" ]; then
+        echo "sysext-select: $(basename "$tgt") is an operator file, not managing '${name}'" >&2
+        unset "selected[$name]"
+    fi
+done
+
+# Prune managed symlinks (targets under our source dirs) that are stale:
+# not the selected file for their name, or dangling.
+for tgt in "$TGT_DIR"/*.raw; do
+    [ -L "$tgt" ] || continue
+    link_target=$(readlink "$tgt")
+    case "$link_target" in
+        "$BAKED_DIR"/*|"$STORE_DIR"/*) ;;
+        *) continue ;;
+    esac
+    name=$(extract_name "$tgt")
+    if [ "${selected[$name]:-}" != "$link_target" ] || [ ! -e "$link_target" ]; then
+        echo "sysext-select: removing stale symlink $(basename "$tgt")"
+        rm -f "$tgt"
+    fi
+done
+
+for name in "${!selected[@]}"; do
+    src=${selected[$name]}
+    tgt="$TGT_DIR/$(basename "$src")"
+    if [ -L "$tgt" ] && [ "$(readlink "$tgt")" = "$src" ]; then
+        continue
+    fi
+    ln -sf "$src" "$tgt"
+    echo "sysext-select: selected $(basename "$src") for '${name}'"
+done
