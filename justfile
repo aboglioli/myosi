@@ -29,6 +29,12 @@ build mode="dev":
     # Stamp the myosi commit for /usr/share/myosi/version. Keep in sync
     # with .github/workflows/build.yml, which reimplements this recipe.
     export GIT_COMMIT="$(git rev-parse --short HEAD)"
+    # Pin the version ONCE, before mkosi: mkosi.version's counter cache
+    # has a 300s TTL, so resolving it again after a long build would
+    # mint the NEXT counter — stage-artifacts then misses the UKI and
+    # silently skips the PartitionUUID rename. Exporting MYOSI_VERSION
+    # makes mkosi.version return this exact value everywhere.
+    export MYOSI_VERSION="$(bash mkosi.version)"
     case "{{mode}}" in
         dev)  sudo --preserve-env mkosi -fi build ;;
         full) sudo --preserve-env mkosi -ff build ;;
@@ -37,9 +43,8 @@ build mode="dev":
     # Rename root/verity artifacts to embed roothash-derived GPT
     # PartitionUUIDs (sysupdate @u capture). Must run after mkosi build
     # — mkosi v26 runs finalize hooks before the UKI is staged.
-    VER=$(bash mkosi.version)
     ARCH=$(uname -m | sed -e 's/^x86_64$/x86-64/' -e 's/^aarch64$/arm64/')
-    sudo IMAGE_VERSION="$VER" ARCHITECTURE="$ARCH" OUTPUTDIR=build scripts/stage-artifacts.sh
+    sudo IMAGE_VERSION="$MYOSI_VERSION" ARCHITECTURE="$ARCH" OUTPUTDIR=build scripts/stage-artifacts.sh
 
 # Boot in qemu/OVMF — full UEFI + UKI + dm-verity + LUKS chain. SSH in
 # via `mkosi ssh` from another terminal (one-time setup: `mkosi genkey`).
