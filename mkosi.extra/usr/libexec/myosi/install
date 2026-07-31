@@ -146,8 +146,8 @@ else
         resolved=$(resolve_version latest "$REPO")
         if [ -z "$resolved" ]; then
             echo "ERROR: could not resolve latest release version." >&2
-            echo "       Need either gh authed ('gh auth login --scopes repo')" >&2
-            echo "       OR a token in MYOSI_GH_TOKEN / GH_TOKEN / GITHUB_TOKEN." >&2
+            echo "       ${REPO} is public — check network access. Private" >&2
+            echo "       forks need MYOSI_GH_TOKEN / GH_TOKEN / GITHUB_TOKEN." >&2
             echo "       Otherwise pre-stage the image:" >&2
             echo "           /var/lib/myosi/installer/myosi_<VER>_<ARCH>.raw.zst[.part*]" >&2
             echo "       and re-run, or pass an explicit source:" >&2
@@ -203,8 +203,6 @@ if [ -n "$RELEASE_VERSION" ]; then
     if [ "${#RELEASE_PARTS[@]}" -eq 0 ]; then
         echo "ERROR: release $RELEASE_VERSION has no matching disk image asset." >&2
         echo "       Expected myosi_${RELEASE_VERSION}_${ARCH}.raw.zst[.partNN]." >&2
-        echo "       Either gh is not authed (try 'gh auth login --scopes repo')" >&2
-        echo "       or the API token has no read access to ${REPO}." >&2
         exit 10
     fi
     echo "  Found ${#RELEASE_PARTS[@]} asset(s):"
@@ -314,10 +312,9 @@ echo "             sudo cryptsetup luksKillSlot /dev/disk/by-partlabel/data-luks
 echo "         Optional TPM2 afterwards: systemd-cryptenroll --tpm2-device=auto ..."
 echo "      3. Set hostname:"
 echo "             sudo hostnamectl hostname <yourhost>"
-echo "      4. Enable sysexts as needed:"
-echo "             sudo myosi extension-enable firmware"
-echo "             sudo myosi extension-enable containers"
+echo "      4. Enable sysexts as needed (myosi extension-list shows all):"
 echo "             sudo myosi extension-enable desktop"
+echo "             sudo myosi extension-enable containers"
 echo "             sudo myosi extension-enable virt"
 echo "      5. Update to latest release any time:"
-echo "             sudo myosi run"
+echo "             sudo myosi update && sudo reboot"

@@ -23,12 +23,5 @@ install target *args:
     # cd to the caller's CWD so relative source paths resolve from where the
     # operator is, not the wrapper's transient justfile dir.
     cd "{{ invocation_directory() }}"
-    # Pre-extract the gh token: sudo strips $HOME, so root can't read the
-    # calling user's gh auth store.
-    if [ -z "${GH_TOKEN:-}" ] && [ -z "${MYOSI_GH_TOKEN:-}" ] \
-            && [ -z "${GITHUB_TOKEN:-}" ] && command -v gh >/dev/null; then
-        token=$(gh auth token 2>/dev/null || true)
-        [ -n "$token" ] && export GH_TOKEN="$token"
-    fi
     sudo --preserve-env=MYOSI_GH_TOKEN,GH_TOKEN,GITHUB_TOKEN,MYOSI_REPO \
         "$script" {{target}} {{args}}

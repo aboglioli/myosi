@@ -1784,9 +1784,8 @@ just build                           # base + all sub-images (incremental)
 just clean
 
 # Test
-just qemu                            # full chain in qemu OVMF (interactive console)
-just qemu-ssh                        # full chain with SSH access (headless-safe)
-just qemu-ext                        # qemu + SSH + locally-staged sysexts injected
+just vm                              # full chain in qemu OVMF (+SSH via `mkosi ssh`)
+just vm virt desktop                 # same, with locally-built sysexts injected
 just nspawn                          # mkosi-managed nspawn boot (no UKI/verity/LUKS)
 
 # Install (same script, target is whatever block device — USB or internal)
