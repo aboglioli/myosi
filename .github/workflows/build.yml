@@ -175,18 +175,12 @@ jobs:
         working-directory: src
         run: ./scripts/generate-bootstrap-key.sh
 
-      - name: Configure ToolsTree + release image set
+      - name: Configure ToolsTree + workspace
         working-directory: src
-        # The committed mkosi.conf only declares `Dependencies=initrd`,
-        # so a bare `mkosi build` produces just tools+initrd+main. The
-        # sysext sub-images + main-image profiles are opted in per host
-        # via mkosi.local.conf (gitignored). CI has no such file, so
-        # release <=2026.07.08.01 shipped the base myosi image with NO
-        # sysexts. Generate the release image set here to mirror the
-        # dev-host mkosi.local.conf: containers+virt profiles baked into
-        # the main image, desktop+nvidia sysexts built as standalone
-        # .raw artifacts. mybox / nvidia-580xx / zfs are intentionally
-        # excluded from the fleet release.
+        # The release image set (containers+virt profiles, desktop+
+        # nvidia sysexts) is declared in the tracked mkosi.conf; this
+        # local conf only supplies the runner's toolchain + scratch
+        # paths. mybox / nvidia-580xx / zfs stay out of fleet releases.
         run: |
           cat > mkosi.local.conf <<EOF
           [Build]
@@ -195,12 +189,6 @@ jobs:
           ToolsTreeRelease=44
           WorkspaceDirectory=$TMPDIR
           PackageCacheDirectory=$TMPDIR/cache
-
-          [Config]
-          Profiles=containers
-          Profiles=virt
-          Dependencies=desktop
-          Dependencies=nvidia
           EOF
 
       - name: Build everything
