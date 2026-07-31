@@ -169,7 +169,8 @@ jobs:
         # sysupdate (each release would carry a different bootstrap key
         # while LUKS slot 0 stays bound to the original install's key).
         # Same secret value across every release keeps unlock stable
-        # for hosts that haven't yet run `myosi data-finalize`.
+        # for hosts that haven't yet wiped bootstrap slot 0
+        # (cryptsetup luksKillSlot).
         env:
           MYOSI_DATA_KEY:  ${{ secrets.MYOSI_DATA_KEY }}
         working-directory: src
@@ -177,10 +178,17 @@ jobs:
 
       - name: Configure ToolsTree + workspace
         working-directory: src
-        # The release image set (containers+virt profiles, desktop+
-        # nvidia sysexts) is declared in the tracked mkosi.conf; this
-        # local conf only supplies the runner's toolchain + scratch
-        # paths. mybox / nvidia-580xx / zfs stay out of fleet releases.
+        # The standard image set (containers+virt profiles, desktop+
+        # nvidia sysexts) is declared in the tracked mkosi.conf. CI adds
+        # the remaining sysext sub-images: base + sysext transfers share
+        # one @v generation in sysupdate.d, and sysupdate never offers a
+        # version that is incomplete for the enabled feature set — a
+        # release missing any shipped feature's .raw would silently
+        # block updates on every host that enabled it. A zfs build
+        # failure (upstream lagging a kernel bump) therefore fails the
+        # release loudly instead; bump ZFS_VERSION or ship without a new
+        # tag. mybox stays out of fleet releases (separate machines
+        # component — a missing asset only stalls that component).
         run: |
           cat > mkosi.local.conf <<EOF
           [Build]
@@ -189,6 +197,12 @@ jobs:
           ToolsTreeRelease=44
           WorkspaceDirectory=$TMPDIR
           PackageCacheDirectory=$TMPDIR/cache
+
+          [Config]
+          Dependencies=containers
+          Dependencies=virt
+          Dependencies=nvidia-580xx
+          Dependencies=zfs
           EOF
 
       - name: Build everything
@@ -197,10 +211,9 @@ jobs:
           MYOSI_VERSION: ${{ steps.version.outputs.value }}
         run: |
           mkdir -p build
-          # Same stamp `just build` applies. Without it, postinst-common.sh
-          # falls back to GIT_COMMIT=unknown, which is what every CI-built
-          # image carried before this line existed. Checkout is fetch-depth: 0
-          # at src/, so `git -C ..` resolves.
+          # Stamp the myosi commit for /usr/share/myosi/version — build
+          # provenance reference; without it postinst-common.sh falls back
+          # to GIT_COMMIT=unknown.
           export GIT_COMMIT="$(git rev-parse --short HEAD)"
           sudo --preserve-env=MYOSI_VERSION,TMPDIR,GIT_COMMIT mkosi -ff build
 
