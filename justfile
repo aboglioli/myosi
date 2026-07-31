@@ -55,22 +55,30 @@ build mode="dev":
 vm +sysexts="":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -z "{{sysexts}}" ]; then
-        exec mkosi -f vm --ssh=runtime
-    fi
-    # Parse version from the built UKI — running mkosi.version here could
-    # mint a NEW counter value and miss the artifacts actually in build/.
+    # Parse version from the built UKI and pin it: a bare mkosi.version
+    # call here would mint the NEXT counter and mkosi would refuse with
+    # "has not been built yet" (or -f would silently REBUILD instead of
+    # booting the artifacts under test).
     ARCH=$(uname -m | sed -e 's/^x86_64$/x86-64/' -e 's/^aarch64$/arm64/')
     UKI=$(find build -maxdepth 1 -name "myosi_*_${ARCH}.efi" | sort -V | tail -1)
     [ -n "$UKI" ] || { echo "ERROR: no built UKI in build/ — run 'just build' first" >&2; exit 1; }
-    VERSION=$(basename "$UKI" | sed -E "s/^myosi_(.+)_${ARCH}\.efi$/\1/")
+    export MYOSI_VERSION=$(basename "$UKI" | sed -E "s/^myosi_(.+)_${ARCH}\.efi$/\1/")
+    # SecureBoot firmware + the enrolled varstore so the kernel picks up
+    # boot.crt/image.crt into .platform — signed verity + sysext
+    # validation then works exactly like production.
+    VMARGS=(--firmware=uefi-secure-boot
+            --firmware-variables="$PWD/keys/OVMF_VARS-enrolled.fd"
+            --ssh=runtime --register=no)
+    if [ -z "{{sysexts}}" ]; then
+        exec mkosi "${VMARGS[@]}" vm
+    fi
     EXTDIR=$(mktemp -d -t myosi-vm-ext-XXXXXX)
     trap 'rm -rf "$EXTDIR"' EXIT
     for sx in {{sysexts}}; do
-        f="build/${sx}_${VERSION}_${ARCH}.raw"
+        f="build/${sx}_${MYOSI_VERSION}_${ARCH}.raw"
         [ -f "$f" ] && cp "$f" "$EXTDIR/" || echo "WARNING: sysext $sx not found at $f" >&2
     done
-    mkosi -f vm --ssh=runtime --runtime-tree="$EXTDIR:/var/lib/extensions"
+    mkosi "${VMARGS[@]}" --runtime-tree="$EXTDIR:/var/lib/extensions" vm
 
 # Boot the base image in systemd-nspawn (userspace only — no UKI/dm-verity/LUKS)
 nspawn:

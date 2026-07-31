@@ -1325,6 +1325,25 @@ sudo myosi status                               # verify features + selection
 Leave any raw you deliberately hand-manage in `/var/lib/extensions/` —
 that is exactly the operator-override case the selector respects.
 
+**SELinux policy refresh (same upgrade, and after any future image that
+changes policy):** the loaded policy lives at
+`/etc/selinux/targeted/policy/` — frozen at first boot like the rest of
+`/etc`, so image-baked policy changes (e.g. the `myosi.cil` module that
+lets `systemd-bless-boot` rename UKIs on the ESP — without it every
+sysupdate-installed UKI stays unblessed and sd-boot rolls back) do NOT
+reach existing hosts automatically. Pull the new factory policy in and
+reboot:
+
+```bash
+sudo cp -a /usr/share/factory/etc/selinux/targeted/policy/. /etc/selinux/targeted/policy/
+sudo load_policy    # live reload — verified; a reboot works too
+```
+
+Note this is a general property of the operator-owned-/etc model:
+Fedora `selinux-policy` updates in new images also need this step.
+Runtime `semodule` operations are unsupported on deployed hosts (the
+module store is not shipped); policy changes ship as images.
+
 ---
 
 ## Upgrading an existing host to the /etc-subvol model (one-time)
