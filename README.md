@@ -80,7 +80,6 @@ Slot sizes are pinned (`SizeMinBytes=SizeMaxBytes`) so systemd-repart's build an
 | `myosi_VERSION_ARCH.verity-sig.raw.zst` | Verity signature partition |
 | `containers_VERSION_ARCH.raw` | Sysext: Podman, Distrobox, Compose, Skopeo, Incus + container-selinux baked into base policy |
 | `desktop_VERSION_ARCH.raw` | Sysext: Niri, fonts, audio, apps |
-| `firmware_VERSION_ARCH.raw` | Sysext: full linux-firmware blob |
 | `virt_VERSION_ARCH.raw` | Sysext: libvirt, qemu, vfio, virt-manager |
 | `nvidia_VERSION_ARCH.raw` | Sysext: NVIDIA `current` (595.x open kernel modules, Turing+ — RTX 16xx/20xx/30xx/40xx/50xx). All `nvidia*.ko` signed with `boot.key`. |
 | `nvidia-580xx_VERSION_ARCH.raw` | Sysext: NVIDIA `580xx` legacy proprietary modules (Maxwell / Pascal / Volta — GTX 9xx/10xx, Titan V). All `nvidia*.ko` signed with `boot.key`. |
@@ -2231,8 +2230,8 @@ No rebuild. Stage extensions on the host, bind-mount them into the VM at boot vi
 # Stage extensions from the build directory
 VERSION=$(ls build/ | grep -oP '\d{4}\.\d{2}\.\d{2}\.\d{2}' | head -1)
 mkdir -p /tmp/myosi-extensions
-cp build/firmware_${VERSION}.raw /tmp/myosi-extensions/
-cp build/virt_${VERSION}_${ARCH}.raw      /tmp/myosi-extensions/
+cp build/desktop_${VERSION}_${ARCH}.raw /tmp/myosi-extensions/
+cp build/virt_${VERSION}_${ARCH}.raw    /tmp/myosi-extensions/
 
 # Boot with extensions injected
 mkosi vm --ssh=runtime --cpus=4 --ram=8G \
@@ -2312,10 +2311,10 @@ systemd-sysext list
 #### Offline inspection
 
 ```bash
-sudo systemd-dissect build/firmware_*.raw
+sudo systemd-dissect build/virt_*.raw
 # Shows: type=sysext, image_id=virt, extension-release metadata
 
-sudo systemd-dissect --list build/firmware_*.raw | head -30
+sudo systemd-dissect --list build/virt_*.raw | head -30
 # Lists all files in the extension
 ```
 
@@ -2330,7 +2329,7 @@ Bind-mount extensions into a running nspawn instance:
 ```bash
 # Stage extensions
 mkdir -p /tmp/myosi-extensions
-cp build/firmware_*.raw /tmp/myosi-extensions/
+cp build/virt_*.raw /tmp/myosi-extensions/
 
 # Boot nspawn with extensions bound
 sudo systemd-nspawn \
@@ -2372,7 +2371,7 @@ tmux attach -t myosi-vm                   # reattach to serial console
 
 # ── With extensions ──
 mkdir -p /tmp/myosi-extensions
-cp build/firmware_*.raw /tmp/myosi-extensions/
+cp build/virt_*.raw /tmp/myosi-extensions/
 mkosi vm --ssh=runtime --cpus=4 --ram=8G \
   --runtime-tree=/tmp/myosi-extensions:/var/lib/extensions
 
