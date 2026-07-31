@@ -3,12 +3,10 @@
 # (url-file source + SHA256SUMS manifest) — no gh auth, no local cache
 # staging. Base root/verity/UKI and feature-enabled sysexts live in ONE
 # sysupdate.d dir sharing @v, so a version is only ever offered when
-# every enabled transfer has assets for it. Machines (mybox DDI) stay a
-# separate component: different post-apply verb (machinectl restart) and
-# not part of every release. Calls the systemd-sysupdate binary directly
-# (the `sysupdate` symlink), not updatectl: systemd-sysupdated's F44
-# SELinux sandbox silently denies loop devices and dosfs_t /efi writes
-# (details in lib.sh sysupdate_env).
+# every enabled transfer has assets for it. Calls the systemd-sysupdate
+# binary directly (the `sysupdate` symlink), not updatectl:
+# systemd-sysupdated's F44 SELinux sandbox silently denies loop devices
+# and dosfs_t /efi writes (details in lib.sh sysupdate_env).
 
 # ------- update ----------------------------------------------------
 
@@ -53,12 +51,6 @@ update version="" refresh="":
     [ -n "$raw_version" ] && [ "$raw_version" != latest ] && cmd+=("$raw_version")
     "${cmd[@]}"
 
-    if [ -d "$MACHINES_DIR" ] && ls "$MACHINES_DIR"/*.transfer >/dev/null 2>&1; then
-        mcmd=("$SYSUPDATE" --component=machines update)
-        [ -n "$raw_version" ] && [ "$raw_version" != latest ] && mcmd+=("$raw_version")
-        "${mcmd[@]}" || echo "WARN: machines component update failed (non-fatal)" >&2
-    fi
-
     if [ "$REFRESH" = "true" ]; then
         refresh_sysext
         echo "Refreshed active sysext overlay. Restart affected services manually."
@@ -84,11 +76,6 @@ status:
         echo "== features =="
         "$SYSUPDATE" features --no-pager 2>/dev/null | sed 's/^/  /' || true
         echo
-        if [ -d "$MACHINES_DIR" ] && ls "$MACHINES_DIR"/*.transfer >/dev/null 2>&1; then
-            echo "== machines =="
-            "$SYSUPDATE" --component=machines list --no-pager 2>/dev/null | sed 's/^/  /' || true
-            echo
-        fi
     fi
 
     echo "== sysext store (/var/lib/myosi/extensions) =="
@@ -112,6 +99,3 @@ vacuum:
 
     command -v "$SYSUPDATE" >/dev/null || { echo "ERROR: $SYSUPDATE is required" >&2; exit 4; }
     "$SYSUPDATE" vacuum 2>/dev/null || true
-    if [ -d "$MACHINES_DIR" ] && ls "$MACHINES_DIR"/*.transfer >/dev/null 2>&1; then
-        "$SYSUPDATE" --component=machines vacuum 2>/dev/null || true
-    fi

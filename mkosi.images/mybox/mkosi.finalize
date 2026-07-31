@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-# mybox finalize — all work shared with main via
-# mkosi.shared/finalize-common.sh (/etc → factory snapshot + /etc wipe).
-
-set -euo pipefail
-
-source "${SRCDIR}/mkosi.shared/finalize-common.sh"

@@ -1,4 +1,4 @@
-# Shared postinst for FINAL ROOT IMAGES ONLY (main image + mybox DDI).
+# Shared postinst for FINAL ROOT IMAGES ONLY (the main image today).
 # DO NOT source from sysext postinsts: sysexts overlay main's /usr at
 # runtime, so version metadata / extensions written here would shadow
 # main's copy (sysexts use sysext-build.sh instead). Covers preset-all,
@@ -35,7 +35,7 @@ mkdir -p "$BUILDROOT/srv"
 mkdir -p "$BUILDROOT/home"
 
 # Version metadata. KVER is empty for sub-images that strip
-# /usr/lib/modules (mybox) → KERNEL_VERSION=unknown.
+# /usr/lib/modules → KERNEL_VERSION=unknown.
 KVER=$(ls "$BUILDROOT/usr/lib/modules/" 2>/dev/null | head -1)
 mkdir -p "$BUILDROOT/usr/share/myosi"
 cat > "$BUILDROOT/usr/share/myosi/version" <<EOF

@@ -1,4 +1,4 @@
-# Shared finalize for FINAL ROOT IMAGES ONLY (main image + mybox DDI).
+# Shared finalize for FINAL ROOT IMAGES ONLY (the main image today).
 # DO NOT source from sysext finalizers: anything staged under /usr here
 # would shadow main's copy at the runtime overlay merge (sysexts use
 # sysext-build.sh instead). Jobs: snapshot /etc → /usr/share/factory/etc,

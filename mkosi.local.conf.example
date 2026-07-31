@@ -4,12 +4,11 @@ WorkspaceDirectory=/var/home/<user>/.cache/mkosi-workspace
 # The standard image set (containers+virt baked, desktop+nvidia
 # sysexts) is declared in the tracked mkosi.conf. Add host extras here:
 # [Config]
-# Dependencies=mybox
 # Dependencies=nvidia-580xx
 # Dependencies=zfs
 
 # QEMU testing overrides — SecureBoot-free + serial console so `just
-# qemu` boots under plain UEFI. NEVER ship to real hardware with these:
+# vm` boots under plain UEFI. NEVER ship to real hardware with these:
 # they unwind the production boot trust chain.
 
 [Output]

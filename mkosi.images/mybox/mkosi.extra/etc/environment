@@ -1,9 +1,0 @@
-# mybox PAM-visible env — the .nspawn [Environment] only seeds PID 1;
-# PAM scrubs before user shells, so Wayland/Pulse vars must live here.
-# Values MUST match mybox.nspawn [Environment].
-
-DISPLAY=:0
-WAYLAND_DISPLAY=/run/host/wayland-1
-XDG_RUNTIME_DIR=/run/user/1000
-PULSE_SERVER=unix:/run/host/pulse/native
-XDG_SESSION_TYPE=wayland

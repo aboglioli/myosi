@@ -176,19 +176,18 @@ jobs:
         working-directory: src
         run: ./scripts/generate-bootstrap-key.sh
 
-      - name: Configure ToolsTree + workspace
+      - name: Configure ToolsTree + release image set
         working-directory: src
         # The standard image set (containers+virt profiles, desktop+
-        # nvidia sysexts) is declared in the tracked mkosi.conf. CI adds
-        # the remaining sysext sub-images: base + sysext transfers share
-        # one @v generation in sysupdate.d, and sysupdate never offers a
-        # version that is incomplete for the enabled feature set — a
-        # release missing any shipped feature's .raw would silently
-        # block updates on every host that enabled it. A zfs build
-        # failure (upstream lagging a kernel bump) therefore fails the
-        # release loudly instead; bump ZFS_VERSION or ship without a new
-        # tag. mybox stays out of fleet releases (separate machines
-        # component — a missing asset only stalls that component).
+        # nvidia sysexts) comes from the tracked mkosi.conf; CI adds
+        # every remaining sysext sub-image. Base + sysext transfers
+        # share one @v generation in sysupdate.d and sysupdate never
+        # offers a version that is incomplete for the enabled feature
+        # set — a release missing any shipped feature's .raw would
+        # silently block updates on every host that enabled it. A zfs
+        # build failure (upstream lagging a kernel bump) therefore
+        # fails the release loudly; bump ZFS_VERSION or ship without a
+        # new tag.
         run: |
           cat > mkosi.local.conf <<EOF
           [Build]
@@ -299,7 +298,7 @@ jobs:
           # <name>_<VER>_<ARCH>.raw* — pick up only the host arch.
           #
           # Skip base-tree: Format=directory, internal BaseTrees=
-          # source for every sysext + mybox — no .raw produced.
+          # source for every sysext — no .raw produced.
           for d in mkosi.images/*/; do
             name=$(basename "$d")
             case "$name" in

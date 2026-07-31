@@ -163,8 +163,8 @@ resolve_boot_disk() {
     echo "/dev/$cur"
 }
 
-# Populate SYSUPDATE / SU_DIR / MACHINES_DIR / STORE globals from env or
-# defaults (globals on purpose — callers use them after return).
+# Populate SYSUPDATE / SU_DIR / STORE globals from env or defaults
+# (globals on purpose — callers use them after return).
 sysupdate_env() {
     # Direct systemd-sysupdate binary (the `sysupdate` symlink), NOT updatectl:
     # systemd-sysupdated's SELinux sandbox on Fedora 44 blocks the loop
@@ -177,11 +177,6 @@ sysupdate_env() {
     # offers versions complete across every enabled transfer — atomic
     # base+sysext generations. Feature files live here too.
     SU_DIR="${MYOSI_SYSUPDATE_DIR:-/usr/lib/sysupdate.d}"
-    # Machines (nspawn DDIs, mybox today) stay a separate component:
-    # post-apply differs (machinectl restart vs sysext remerge) and mybox
-    # is not in every release — inside the main dir a missing asset would
-    # hide the whole version. Recipe code paths must NOT cross-wire the two.
-    MACHINES_DIR="${MYOSI_SYSUPDATE_MACHINES_DIR:-/usr/lib/sysupdate.machines.d}"
     # Versioned sysext store (sysupdate target); sysext-select exposes one
     # version per name into /var/lib/extensions.
     STORE="${MYOSI_SYSEXT_STORE:-/var/lib/myosi/extensions}"

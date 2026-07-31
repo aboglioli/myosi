@@ -85,7 +85,6 @@ Slot sizes are pinned (`SizeMinBytes=SizeMaxBytes`) so systemd-repart's build an
 | `nvidia_VERSION_ARCH.raw` | Sysext: NVIDIA `current` (595.x open kernel modules, Turing+ — RTX 16xx/20xx/30xx/40xx/50xx). All `nvidia*.ko` signed with `boot.key`. |
 | `nvidia-580xx_VERSION_ARCH.raw` | Sysext: NVIDIA `580xx` legacy proprietary modules (Maxwell / Pascal / Volta — GTX 9xx/10xx, Titan V). All `nvidia*.ko` signed with `boot.key`. |
 | `zfs_VERSION_ARCH.raw` | Sysext: OpenZFS (`zfs-2.4.2` today) — `zfs.ko` + `spl.ko` signed with `boot.key`, plus userspace (`zfs`, `zpool`, `zed`, libraries, `zfs-dracut`, `python3-pyzfs`). Built from the upstream tarball, no RPMFusion / zfsonlinux.org repo dependency. |
-| `mybox_VERSION_ARCH.raw` | Sealed verity-erofs nspawn DDI. Drop into `/var/lib/machines/`, start via `machinectl start mybox`. Optional, opt-in via `myosi machine-enable mybox`. |
 
 Each `*_VERSION_ARCH.raw` sysext carries verity + signature partitions. Every kernel module shipped in those sysexts is signed against `boot.key` so `module.sig_enforce=1` in the UKI cmdline accepts them when the kernel `.platform` keyring has `boot.crt` enrolled (UEFI db on qemu, MOK on hardware).
 
@@ -1019,7 +1018,7 @@ sudo myosi update
 sudo reboot
 ```
 
-One `systemd-sysupdate update` run covers the whole generation atomically: base root + verity + verity-sig + every feature-enabled sysext share one version identifier in `/usr/lib/sysupdate.d/`, and sysupdate never offers a version unless ALL of those transfers have assets for it. The UKI transfer is numbered last (`90-uki.transfer`) so the entry point is written only after everything else landed. Machine DDIs (`mybox`) update as a separate `machines` component in the same command.
+One `systemd-sysupdate update` run covers the whole generation atomically: base root + verity + verity-sig + every feature-enabled sysext share one version identifier in `/usr/lib/sysupdate.d/`, and sysupdate never offers a version unless ALL of those transfers have assets for it. The UKI transfer is numbered last (`90-uki.transfer`) so the entry point is written only after everything else landed.
 
 Updates stage only: the new root lands in the inactive A/B slot, the new UKI on the ESP with boot-counting armed (`+3` tries — sd-boot rolls back to the previous UKI/slot after repeated boot failures, `systemd-bless-boot` blesses a healthy boot), and new sysext versions land in the store at `/var/lib/myosi/extensions/` WITHOUT touching the running overlay — `sysext-select` keeps the booted image's versions merged until you reboot into the new slot. Rollback works the same way in reverse: booting the old slot re-selects the old sysexts.
 
@@ -1042,7 +1041,6 @@ The transfer definitions live in:
 
 ```text
 /usr/lib/sysupdate.d/            # host root, verity, verity-sig, UKI + sysext features (one @v generation)
-/usr/lib/sysupdate.machines.d/   # machine DDIs (mybox), separate component
 ```
 
 Pinning: the `url-file` source sees only the LATEST release (`releases/latest/download/`), so `myosi update VERSION` works only when VERSION is the latest. To roll back, boot the previous slot from the sd-boot menu; to install a specific sysext version, use `myosi extension-enable NAME VERSION` (direct per-tag download).
@@ -1477,7 +1475,6 @@ Under the hood, `myosi update` is a thin wrapper over the native mechanism:
 2. sysupdate downloads the release's `SHA256SUMS` manifest, enumerates versions from the asset filenames (`@v`), and only offers a version complete across the base transfers AND every enabled sysext feature — one atomic generation.
 3. Payloads are downloaded (GitHub's redirects followed) and verified against the manifest hashes unconditionally; the artifacts additionally self-authenticate at boot (dm-verity signatures against the kernel `.platform` keyring, SecureBoot-signed UKI). `Verify=false` skips only the optional GPG signature on the manifest itself — flip it on later by shipping `SHA256SUMS.gpg` + `/etc/systemd/import-pubring.pgp`.
 4. Root/verity/verity-sig land in the inactive A/B slot, sysext raws in the versioned store, and the UKI last (`90-uki.transfer`) with boot-counting armed (`+3` tries; `systemd-bless-boot` blesses a good boot, sd-boot falls back to the previous entry otherwise).
-5. `systemd-sysupdate --component=machines update` handles opt-in machine DDIs (mybox) the same way.
 
 Automatic updates: the stock `systemd-sysupdate.timer` can drive the same definitions unattended — enable it per host with `systemctl enable --now systemd-sysupdate.timer` (reboot remains manual).
 
@@ -1798,7 +1795,7 @@ just install /dev/nvme0n1 /dev/sdb   # clone the booted USB onto NVMe
 
 The `myosi` wrapper only handles **myosi-specific orchestration**: sysupdate (GitHub releases), sysext feature management, and the install script. Everything else (LUKS keyslots, btrfs subvols, snapshots, portable services, credentials) is run with the upstream tool directly — see the post-install runbook (under Installing to real hardware) for the manual commands.
 
-The wrapper scans `/usr/share/myosi/just/` (base modules `00-update.just`, `10-extensions.just`, `11-machines.just`, `40-install.just`) and any sysext-provided modules (e.g. `50-virt.just`) at every invocation, emitting a transient justfile in `/run/myosi/`. Sysexts can add their own operator commands without the base image knowing about them. Run `myosi --list` to see what's currently available.
+The wrapper scans `/usr/share/myosi/just/` (base modules `00-update.just`, `10-extensions.just`, `40-install.just`) and any sysext-provided modules (e.g. `50-virt.just`) at every invocation, emitting a transient justfile in `/run/myosi/`. Sysexts can add their own operator commands without the base image knowing about them. Run `myosi --list` to see what's currently available.
 
 ```bash
 sudo myosi extension-enable   NAME [VERSION]   # enable a sysext feature
@@ -1808,7 +1805,6 @@ sudo myosi update                              # stage base + sysexts + machines
 sudo myosi update --refresh                    # …plus live sysext refresh
 sudo myosi status                              # update + sysext state
 sudo myosi vacuum                              # remove old generations
-sudo myosi machine-enable     NAME [VERSION]   # enable a machine DDI (mybox)
 sudo myosi install             /dev/sdX [SRC]  # write a release to disk
 ```
 
