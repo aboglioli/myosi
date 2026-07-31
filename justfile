@@ -28,9 +28,9 @@ build mode="dev":
     # Stage the LUKS bootstrap key for repart Encrypt=key-file (never
     # checked in; see scripts/generate-bootstrap-key.sh).
     ./scripts/generate-bootstrap-key.sh
-    # Stamp the real commit for /usr/share/myosi/version. Keep in sync
-    # with .github/workflows/myosi.yml, which reimplements this recipe.
-    export GIT_COMMIT="$(git -C .. rev-parse --short HEAD)"
+    # Stamp the myosi commit for /usr/share/myosi/version. Keep in sync
+    # with .github/workflows/build.yml, which reimplements this recipe.
+    export GIT_COMMIT="$(git rev-parse --short HEAD)"
     case "{{mode}}" in
         dev)
             echo "Building incrementally"

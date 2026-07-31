@@ -3,8 +3,8 @@
 #
 # Builds a transient justfile at /run/myosi/justfile each invocation by
 # importing every *.just module under /usr/share/myosi/just/. The base
-# image ships 00-update / 10-extensions / 20-storage / 30-security /
-# 40-install in that directory. Sysexts (virt, desktop, ...) can drop
+# image ships 00-update / 10-extensions / 11-machines / 40-install in
+# that directory. Sysexts (virt, desktop, ...) can drop
 # their own NN-<name>.just into the SAME directory via their mkosi.extra
 # tree — the file appears at /usr/share/myosi/just/ exactly when the
 # sysext is merged into /usr/, and disappears when it isn't. The wrapper

@@ -5,9 +5,10 @@
 # wipe /etc (here, not RemoveFiles= — that runs BEFORE finalize, i.e.
 # before the snapshot), bake baseline sysexts. Needs $BUILDROOT, $SRCDIR.
 
-# 1. + 2. /etc → /usr/share/factory/etc snapshot + full wipe. The initrd
-# does not need sealed /etc/fstab or /etc/crypttab — sysroot-prep.service
-# unlocks/mounts /sysroot/var before the /etc overlay forms.
+# 1. + 2. /etc → /usr/share/factory/etc snapshot + full wipe. The sealed
+# root needs no /etc/fstab or /etc/crypttab — myosi-data-attach.service
+# (initrd) unlocks data-luks and sysroot-etc.mount mounts the /etc subvol
+# before pivot.
 if [ -d "$BUILDROOT/etc" ]; then
     rm -rf "$BUILDROOT/usr/share/factory/etc"
     mkdir -p "$BUILDROOT/usr/share/factory/etc"
@@ -20,6 +21,6 @@ else
 fi
 
 # 3. Sysext baselines (none currently). Infrastructure stays for future
-# ones: baked .raws in /usr/share/myosi/extensions/ get symlinked into
-# /var/lib/extensions/ by sysext-baked-sync (systemd-sysext.service
+# ones: baked .raws in /usr/share/myosi/extensions/ get selected into
+# /var/lib/extensions/ by sysext-select (systemd-sysext.service
 # drop-in, gated on ConditionDirectoryNotEmpty). Empty dir → no work.

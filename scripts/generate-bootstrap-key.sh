@@ -7,8 +7,9 @@ set -euo pipefail
 # existing keys/data.key → fresh `openssl rand 32`.
 # Must stay STABLE across releases: a per-build key would leave LUKS
 # slot 0 bound to the old key after a sysupdate UKI swap — data lockout
-# unless the operator already ran `myosi data-finalize`. Treat leaks
-# like signing-key leaks: every install with slot 0 intact is exposed.
+# unless the operator already wiped slot 0 (cryptsetup luksKillSlot).
+# Treat leaks like signing-key leaks: every install with slot 0 intact
+# is exposed.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
