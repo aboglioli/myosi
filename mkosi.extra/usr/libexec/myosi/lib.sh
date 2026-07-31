@@ -11,14 +11,6 @@ require_root() {
     fi
 }
 
-require_gh() {
-    if ! command -v gh >/dev/null; then
-        echo "ERROR: gh CLI required; install it and run 'gh auth login'" >&2
-        exit 2
-    fi
-    gh auth status --hostname github.com >/dev/null
-}
-
 validate_name() {
     local name="$1" label="${2:-name}"
     case "$name" in
@@ -56,7 +48,7 @@ _gh_curl_auth_args() {
 
 # Explicit calver passes through; "latest"/empty resolves via the release API.
 resolve_version() {
-    local v="${1:-}" repo="${2:-${MYOSI_REPO:-user/myosi}}"
+    local v="${1:-}" repo="${2:-${MYOSI_REPO:-aboglioli/myosi}}"
     if [ -n "$v" ] && [ "$v" != latest ]; then
         printf '%s\n' "$v"
         return 0
@@ -65,7 +57,7 @@ resolve_version() {
 }
 
 resolve_latest_release() {
-    local repo="${1:-user/myosi}"
+    local repo="${1:-aboglioli/myosi}"
     local version=""
     # Prefer gh when present + authed (private repos require auth).
     if _gh_auth_ok; then
@@ -90,7 +82,7 @@ resolve_latest_release() {
 # List release asset names (gh first, REST fallback) — callers use this to
 # detect single-file vs split .partNN releases.
 list_release_assets() {
-    local version="$1" repo="${2:-user/myosi}"
+    local version="$1" repo="${2:-aboglioli/myosi}"
     if _gh_auth_ok; then
         if gh release view "$version" --repo "$repo" \
                 --json assets --jq '.assets[].name' 2>/dev/null; then
@@ -104,10 +96,15 @@ list_release_assets() {
         | sed -n 's/.*"name": *"\([^"]*\)".*/\1/p'
 }
 
-# Download one asset by exact name to <dest>; gh first, then REST + token
-# (works on private repos). Nonzero on failure.
+# Download one asset by exact name to <dest>. Public repo: plain curl on
+# the stable per-tag URL, no auth. Falls back to gh, then the token-authed
+# assets API (still works if the repo ever goes private). Nonzero on failure.
 download_release_asset() {
-    local version="$1" name="$2" dest="$3" repo="${4:-user/myosi}"
+    local version="$1" name="$2" dest="$3" repo="${4:-aboglioli/myosi}"
+    if curl -fsSL -o "$dest" \
+            "https://github.com/${repo}/releases/download/${version}/${name}" 2>/dev/null; then
+        return 0
+    fi
     if _gh_auth_ok; then
         if gh release download "$version" --repo "$repo" \
                 --pattern "$name" --output "$dest" --clobber 2>/dev/null; then
@@ -166,8 +163,8 @@ resolve_boot_disk() {
     echo "/dev/$cur"
 }
 
-# Populate SYSUPDATE / SU_DIR / EXT_DIR / MACHINES_DIR / CACHE globals from
-# env or defaults (globals on purpose — callers use them after return).
+# Populate SYSUPDATE / SU_DIR / MACHINES_DIR / STORE globals from env or
+# defaults (globals on purpose — callers use them after return).
 sysupdate_env() {
     # Direct systemd-sysupdate binary (the `sysupdate` symlink), NOT updatectl:
     # systemd-sysupdated's SELinux sandbox on Fedora 44 blocks the loop
@@ -176,13 +173,18 @@ sysupdate_env() {
     # Flip via MYOSI_SYSUPDATE_BIN=updatectl — note its arg form differs
     # (`verb target[@ver]` vs `--component=NAME verb [ver]`).
     SYSUPDATE="${MYOSI_SYSUPDATE_BIN:-sysupdate}"
+    # One dir for base + sysext transfers: shared @v means sysupdate only
+    # offers versions complete across every enabled transfer — atomic
+    # base+sysext generations. Feature files live here too.
     SU_DIR="${MYOSI_SYSUPDATE_DIR:-/usr/lib/sysupdate.d}"
-    EXT_DIR="${MYOSI_SYSUPDATE_EXTENSIONS_DIR:-/usr/lib/sysupdate.extensions.d}"
-    # Machines (nspawn DDIs, mybox today) stay a separate component from
-    # sysexts: post-apply differs (sysext remerge vs machinectl restart).
-    # Recipe code paths must NOT cross-wire the two.
+    # Machines (nspawn DDIs, mybox today) stay a separate component:
+    # post-apply differs (machinectl restart vs sysext remerge) and mybox
+    # is not in every release — inside the main dir a missing asset would
+    # hide the whole version. Recipe code paths must NOT cross-wire the two.
     MACHINES_DIR="${MYOSI_SYSUPDATE_MACHINES_DIR:-/usr/lib/sysupdate.machines.d}"
-    CACHE="${MYOSI_RELEASE_CACHE:-/var/lib/sysupdate}"
+    # Versioned sysext store (sysupdate target); sysext-select exposes one
+    # version per name into /var/lib/extensions.
+    STORE="${MYOSI_SYSEXT_STORE:-/var/lib/myosi/extensions}"
 }
 
 feature_enable() {
@@ -233,15 +235,4 @@ refresh_sysext() {
     # libjack.so.0): waybar failed to launch after extension-enable desktop
     # until ldconfig ran. Always refresh.
     ldconfig 2>/dev/null || true
-}
-
-# Shorthand for the common "enable feature gate, run updater, refresh sysext".
-update_and_refresh() {
-    local name="$1" version="${2:-}"
-    if [ -n "$version" ]; then
-        /usr/libexec/myosi/update run "$version"
-    else
-        /usr/libexec/myosi/update run
-    fi
-    refresh_sysext
 }

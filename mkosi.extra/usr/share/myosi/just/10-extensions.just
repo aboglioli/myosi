@@ -1,4 +1,7 @@
-# Enable, disable, and list sysext features.
+# Enable, disable, and list sysext features. Features + transfers live in
+# /usr/lib/sysupdate.d (same dir as the base image transfers — shared @v
+# generation); raws land in the versioned store /var/lib/myosi/extensions
+# and sysext-select links exactly one version into /var/lib/extensions.
 
 [group('extensions')]
 extension-enable name version="":
@@ -9,15 +12,15 @@ extension-enable name version="":
     if [ -z "{{name}}" ]; then echo "Usage: myosi extension-enable <name> [version]" >&2; exit 2; fi
     validate_name "{{name}}" sysext
 
-    if [ ! -f "/usr/lib/sysupdate.extensions.d/{{name}}.feature" ]; then
+    sysupdate_env
+    if [ ! -f "$SU_DIR/{{name}}.feature" ]; then
         echo "ERROR: unknown sysext feature: {{name}}" >&2
         echo "Available features:" >&2
-        find /usr/lib/sysupdate.extensions.d -maxdepth 1 -name '*.feature' -printf '  %f\n' 2>/dev/null | sed 's/\.feature$//' >&2
+        find "$SU_DIR" -maxdepth 1 -name '*.feature' -printf '  %f\n' 2>/dev/null | sed 's/\.feature$//' >&2
         exit 4
     fi
 
-    REPO="${MYOSI_REPO:-user/myosi}"
-    sysupdate_env
+    REPO="${MYOSI_REPO:-aboglioli/myosi}"
 
     current_image_version() {
         for f in /usr/lib/os-release /etc/os-release; do
@@ -26,6 +29,10 @@ extension-enable name version="":
         done | head -1
     }
 
+    # Default to the BOOTED image's version, not the latest release:
+    # sysext-select only activates the version matching IMAGE_VERSION, and
+    # kmod sysexts must match the running kernel. `myosi update` moves the
+    # whole generation (base + enabled sysexts) forward together.
     requested_version="{{version}}"
     if [ -z "$requested_version" ]; then
         VERSION=$(current_image_version)
@@ -43,18 +50,18 @@ extension-enable name version="":
     echo "Downloading $ASSET from $REPO@$VERSION..."
     download_release_asset "$VERSION" "$ASSET" "$TMPDIR/$ASSET" "$REPO"
 
-    install -d -m 0755 "$CACHE" /var/lib/extensions
-    install -m 0644 "$TMPDIR/$ASSET" "$CACHE/$ASSET"
-    install -m 0644 "$TMPDIR/$ASSET" "/var/lib/extensions/$ASSET"
+    install -d -m 0755 "$STORE"
+    install -m 0644 "$TMPDIR/$ASSET" "$STORE/$ASSET"
 
-    mapfile -t old_versions < <(find /var/lib/extensions -maxdepth 1 -type f -name "{{name}}_*.raw" -printf '%p\n' 2>/dev/null | sort -V)
+    # Keep two versions in the store (mirrors the transfer's InstancesMax=2).
+    mapfile -t old_versions < <(find "$STORE" -maxdepth 1 -type f -name "{{name}}_*.raw" -printf '%p\n' 2>/dev/null | sort -V)
     if [ "${#old_versions[@]}" -gt 2 ]; then
         for old in "${old_versions[@]:0:${#old_versions[@]}-2}"; do
             rm -f "$old"
         done
     fi
 
-    feature_enable "{{name}}" sysupdate.extensions.d
+    feature_enable "{{name}}" sysupdate.d
     refresh_sysext
 
     if ! keyctl list %:.platform 2>/dev/null | grep -qE 'myosi DEV Image' \
@@ -66,7 +73,7 @@ extension-enable name version="":
     fi
 
     [ -n "{{version}}" ] && echo "Enabled sysext '{{name}}' at version {{version}}." \
-                         || echo "Enabled sysext '{{name}}' at the latest release."
+                         || echo "Enabled sysext '{{name}}' at the booted image version."
 
 [group('extensions')]
 extension-disable name:
@@ -77,14 +84,11 @@ extension-disable name:
     if [ -z "{{name}}" ]; then echo "Usage: myosi extension-disable <name>" >&2; exit 2; fi
     validate_name "{{name}}" sysext
 
-    feature_disable "{{name}}" sysupdate.extensions.d
-    rm -f /var/lib/extensions/"{{name}}"_*.raw "/var/lib/extensions/{{name}}.raw"
-    rm -f /var/lib/sysupdate/"{{name}}"_*.raw
-
     sysupdate_env
-    if command -v "$SYSUPDATE" >/dev/null; then
-        "$SYSUPDATE" --component=extensions vacuum 2>/dev/null || true
-    fi
+    feature_disable "{{name}}" sysupdate.d
+    rm -f "$STORE"/"{{name}}"_*.raw
+    # Managed symlink + any legacy direct-drop raws from the pre-store era.
+    rm -f /var/lib/extensions/"{{name}}"_*.raw "/var/lib/extensions/{{name}}.raw"
 
     refresh_sysext
     echo "Disabled sysext '{{name}}'. Reboot to guarantee it is fully unmerged."
@@ -96,22 +100,21 @@ extension-list:
     . /usr/libexec/myosi/lib.sh
     sysupdate_env
 
-    echo "== available features =="
-    if [ -d "$EXT_DIR" ]; then
-        find "$EXT_DIR" -maxdepth 1 -name '*.feature' -printf '  %f\n' 2>/dev/null \
+    echo "== features (enabled state includes /etc drop-ins) =="
+    if command -v "$SYSUPDATE" >/dev/null; then
+        "$SYSUPDATE" features --no-pager 2>/dev/null | sed 's/^/  /' || true
+    else
+        find "$SU_DIR" -maxdepth 1 -name '*.feature' -printf '  %f\n' 2>/dev/null \
             | sed 's/\.feature$//' | sort
     fi
     echo
-    if command -v "$SYSUPDATE" >/dev/null; then
-        echo "== extensions update sets =="
-        "$SYSUPDATE" --component=extensions list --no-pager 2>/dev/null | sed 's/^/  /' || true
-        echo
-    fi
     echo "== sysexts on disk =="
-    echo "-- /usr/lib/extensions/  (verity-baked) --"
-    find /usr/lib/extensions -maxdepth 1 -type f -name '*.raw' -printf '  %f\n' 2>/dev/null | sort
-    echo "-- /var/lib/extensions/  (operator-installed) --"
-    find /var/lib/extensions -maxdepth 1 -type f -name '*.raw' -printf '  %f\n' 2>/dev/null | sort
+    echo "-- /usr/share/myosi/extensions/  (verity-baked baselines) --"
+    find /usr/share/myosi/extensions -maxdepth 1 -type f -name '*.raw' -printf '  %f\n' 2>/dev/null | sort
+    echo "-- /var/lib/myosi/extensions/  (sysupdate store, versioned) --"
+    find "$STORE" -maxdepth 1 -type f -name '*.raw' -printf '  %f\n' 2>/dev/null | sort
+    echo "-- /var/lib/extensions/  (selected for merge) --"
+    find /var/lib/extensions -maxdepth 1 -name '*.raw' -printf '  %f\n' 2>/dev/null | sort
     echo
     echo "== active sysexts (merged into /usr) =="
     systemd-sysext list --no-pager 2>/dev/null || true

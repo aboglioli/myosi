@@ -19,7 +19,7 @@ machine-enable name version="":
         exit 4
     fi
 
-    REPO="${MYOSI_REPO:-user/myosi}"
+    REPO="${MYOSI_REPO:-aboglioli/myosi}"
     sysupdate_env
 
     current_image_version() {
@@ -46,14 +46,14 @@ machine-enable name version="":
     echo "Downloading $ASSET from $REPO@$VERSION..."
     download_release_asset "$VERSION" "$ASSET" "$TMPDIR/$ASSET" "$REPO"
 
-    # Versioned filename matches the transfer MatchPattern and keeps prior
-    # installs for rollback (InstancesMax=2 enforces retention). Operators
-    # symlink {{name}}.raw → desired version when ready to flip.
-    install -d -m 0755 "$CACHE" /var/lib/machines
-    install -m 0644 "$TMPDIR/$ASSET" "$CACHE/$ASSET"
-    install -m 0644 "$TMPDIR/$ASSET" "/var/lib/machines/{{name}}_${VERSION}_${ARCH}.raw"
+    # Installed name matches the transfer TARGET MatchPattern
+    # ({{name}}_@v.raw, no arch — the store is host-local) so sysupdate
+    # counts manual installs as instances (InstancesMax=2 retention).
+    # Operators symlink {{name}}.raw → desired version when ready to flip.
+    install -d -m 0755 /var/lib/machines
+    install -m 0644 "$TMPDIR/$ASSET" "/var/lib/machines/{{name}}_${VERSION}.raw"
 
-    mapfile -t old_versions < <(find /var/lib/machines -maxdepth 1 -type f -name "{{name}}_*_${ARCH}.raw" -printf '%p\n' 2>/dev/null | sort -V)
+    mapfile -t old_versions < <(find /var/lib/machines -maxdepth 1 -type f -name "{{name}}_*.raw" -printf '%p\n' 2>/dev/null | sort -V)
     if [ "${#old_versions[@]}" -gt 2 ]; then
         for old in "${old_versions[@]:0:${#old_versions[@]}-2}"; do
             rm -f "$old"
@@ -65,10 +65,10 @@ machine-enable name version="":
     # No auto-restart: a running container holds the old .raw open, and a
     # silent restart would interrupt user sessions. The echo below shows the
     # manual flip; the operator picks the moment.
-    echo "Enabled machine '{{name}}' at version ${VERSION} (${ARCH})."
+    echo "Enabled machine '{{name}}' at version ${VERSION}."
     echo "To activate:"
     echo "  sudo machinectl stop {{name}} 2>/dev/null || true"
-    echo "  sudo ln -sfn {{name}}_${VERSION}_${ARCH}.raw /var/lib/machines/{{name}}.raw"
+    echo "  sudo ln -sfn {{name}}_${VERSION}.raw /var/lib/machines/{{name}}.raw"
     echo "  sudo machinectl start {{name}}"
 
 [group('machines')]

@@ -18,7 +18,7 @@ else
     exit 1
 fi
 
-REPO="${MYOSI_REPO:-user/myosi}"
+REPO="${MYOSI_REPO:-aboglioli/myosi}"
 RESET_IDENTITY=0
 TARGET=""
 SOURCE=""
