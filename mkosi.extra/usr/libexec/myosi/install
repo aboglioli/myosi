@@ -290,6 +290,14 @@ if [ "$RESET_IDENTITY" = "1" ]; then
         else
             echo "WARN: expected partition $data_part not present — skipping" >&2
         fi
+        # DELETE the GPT entry, don't just wipe the content: first-boot
+        # systemd-repart only formats partitions it CREATES — a surviving
+        # entry with a blank payload would never be re-LUKSed, data-attach
+        # then finds no LUKS header and boot lands in emergency (observed
+        # in qemu). sgdisk also rewrites the backup header at the real end
+        # of a larger target disk as a side effect.
+        sgdisk -d "$data_part_num" "$TARGET" >/dev/null
+        echo "  Deleted GPT entry $data_part_num (repart re-creates + formats on first boot)"
         partprobe "$TARGET" 2>/dev/null || true
         udevadm settle 2>/dev/null || true
     fi

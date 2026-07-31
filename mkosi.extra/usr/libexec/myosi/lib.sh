@@ -147,7 +147,11 @@ resolve_boot_disk() {
     if [ -z "$source" ] || [ "$source" = overlay ]; then
         return 0
     fi
-    cur=$(basename "$source")
+    # Canonicalize first: sysfs indexes dm devices as dm-N, so the
+    # /dev/mapper/root NAME never matches /sys/class/block/* and the walk
+    # would bail out returning a bogus /dev/root — which silently disabled
+    # both the live-disk clone source and the booted-disk overwrite guard.
+    cur=$(basename "$(readlink -f "$source")")
     while [ -e "/sys/class/block/$cur" ]; do
         if [ -d "/sys/class/block/$cur/slaves" ] \
                 && [ -n "$(ls -A "/sys/class/block/$cur/slaves" 2>/dev/null)" ]; then
