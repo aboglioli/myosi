@@ -1296,6 +1296,40 @@ sudo dmesg | grep -iE 'verity|enokey' || true
 
 ---
 
+## Upgrading an existing host to the sysext store model (one-time)
+
+Hosts deployed before the store + selector model have (a) sysext raws as
+REGULAR FILES in `/var/lib/extensions/` — the new `sysext-select` treats
+those as operator overrides and keeps them merged forever, pinning stale
+versions; (b) feature drop-ins under `/etc/sysupdate.extensions.d/` —
+the new transfers live in `sysupdate.d`, so those features silently stop
+updating. After booting the first image that ships `sysext-select`, run
+once:
+
+```bash
+# Move sysext raws into the versioned store (selector takes over):
+sudo mkdir -p /var/lib/myosi/extensions
+sudo mv /var/lib/extensions/*_*_*.raw /var/lib/myosi/extensions/ 2>/dev/null || true
+
+# Move feature enablement to the merged sysupdate.d component:
+for d in /etc/sysupdate.extensions.d/*.feature.d; do
+    [ -d "$d" ] || continue
+    sudo mv "$d" "/etc/sysupdate.d/$(basename "$d")"
+done
+sudo rmdir /etc/sysupdate.extensions.d 2>/dev/null || true
+
+# Old gh-fetch cache is no longer used:
+sudo rm -rf /var/lib/sysupdate/*
+
+sudo systemctl restart systemd-sysext.service   # sysext-select runs
+sudo myosi status                               # verify features + selection
+```
+
+Leave any raw you deliberately hand-manage in `/var/lib/extensions/` —
+that is exactly the operator-override case the selector respects.
+
+---
+
 ## Upgrading an existing host to the /etc-subvol model (one-time)
 
 Existing hosts have a `data-luks` btrfs formatted under the old overlay model: `/var`, `/home`, `/srv` subvolumes exist; `/etc` does NOT exist as a subvolume; operator-written `/etc` state lives in the overlay upperdir at `/var/etc/`. `systemd-repart`'s `Subvolumes=/etc` only fires at format time, so the new image will NOT auto-create the subvol — the initrd drops to emergency with `data-attach: /etc subvol missing on /dev/mapper/data`.
