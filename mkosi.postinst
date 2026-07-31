@@ -14,6 +14,14 @@ SRCDIR="${SRCDIR:-$(dirname "$(realpath "${BASH_SOURCE[0]}")")}"
 
 source "${SRCDIR}/mkosi.shared/postinst-common.sh"
 
+# Bake the myosi SELinux additions (see the .cil for the why). semodule
+# rebuilds /etc/selinux/targeted/policy/policy.* — that binary reaches
+# hosts via the factory /etc snapshot on first boot. The module store it
+# also writes under /var/lib/selinux is wiped with build-time /var
+# (shadowed by data-luks at runtime anyway), so runtime semodule ops
+# are not supported on deployed hosts — policy changes ship as images.
+chroot "$BUILDROOT" semodule -i /usr/share/myosi/selinux/myosi.cil
+
 # Ship public signing certs for MOK enrollment (private keys never
 # reach the image). Both PEM and DER — `mokutil --import` rejects PEM.
 # Two destinations: /usr/share/myosi/keys/ for runtime operator use,

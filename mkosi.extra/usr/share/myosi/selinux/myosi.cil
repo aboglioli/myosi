@@ -1,0 +1,14 @@
+; myosi policy additions, installed at image build (mkosi.postinst runs
+; semodule -i in the buildroot; the compiled policy persists via the
+; factory /etc snapshot — /var/lib/selinux's module store is wiped with
+; the rest of build-time /var and is shadowed by data-luks at runtime).
+;
+; init_t must manage UKIs on the vfat ESP (dosfs_t):
+; systemd-bless-boot renames myosi_<v>+3-0.efi -> myosi_<v>.efi to bless
+; a boot — Fedora targeted denies init_t here, so every boot of a
+; sysupdate-installed UKI stayed unblessed and sd-boot rolled back after
+; the tries ran out (verified in qemu: permissive/initrc_t succeed,
+; init_t is denied; audit=0 hides the AVCs). Also covers
+; systemd-boot-random-seed and future systemd-sysupdated ESP writes.
+(allow init_t dosfs_t (dir (open read search write add_name remove_name getattr lock ioctl)))
+(allow init_t dosfs_t (file (open read write append create rename unlink setattr getattr lock map ioctl)))

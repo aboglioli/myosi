@@ -12,6 +12,12 @@ Before=initrd.target initrd-switch-root.target
 # First boot only — /etc populated later, and the SELinux xattr on the
 # subvol root persists across mounts.
 ConditionDirectoryNotEmpty=!/sysroot/etc
+# HARD gate on the subvol actually being mounted: the /etc chain uses
+# Wants= (not Requires=, see myosi-data-attach.service), so if
+# data-attach or sysroot-etc.mount failed this unit still gets started
+# — and would spray the factory tree at the read-only erofs /etc stub
+# (observed as a cp error storm racing the OnFailure emergency isolate).
+ConditionPathIsMountPoint=/sysroot/etc
 
 [Service]
 Type=oneshot
