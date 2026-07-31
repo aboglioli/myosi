@@ -8,10 +8,12 @@
 # slot could be overwritten while the kernel still has it pinned for
 # the running root, leading to a verify failure on the next boot.
 ProtectVersion=%A
+# See 10-root.transfer for the Verify=/url-file rationale.
+Verify=false
 
 [Source]
-Type=regular-file
-Path=/var/lib/sysupdate
+Type=url-file
+Path=https://github.com/aboglioli/myosi/releases/latest/download/
 MatchPattern=myosi_@v_%a.verity-sig.raw.zst
 
 [Target]

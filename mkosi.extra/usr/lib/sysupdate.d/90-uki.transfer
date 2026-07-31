@@ -1,0 +1,31 @@
+[Transfer]
+# 90- prefix: transfers run in filename order and the UKI is the entry
+# point — it must be written LAST, after root/verity/sig and sysexts,
+# so an interrupted update never leaves a bootable UKI pointing at a
+# half-installed generation.
+ProtectVersion=%A
+# See 10-root.transfer for the Verify=/url-file rationale.
+Verify=false
+
+[Source]
+Type=url-file
+Path=https://github.com/aboglioli/myosi/releases/latest/download/
+MatchPattern=myosi_@v_%a.efi
+
+[Target]
+Type=regular-file
+Path=/efi/EFI/Linux
+# @l/@d wildcards are REQUIRED for boot counting: TriesLeft=/TriesDone=
+# only take effect when the target pattern carries them. New UKIs are
+# named after the FIRST pattern (born as +3), sd-boot rewrites the
+# suffix as it counts down, systemd-bless-boot strips it on a healthy
+# boot — the extra patterns keep sysupdate matching the file through
+# every rename. The old single-pattern form installed UKIs with no
+# counter, so sd-boot auto-rollback never engaged.
+MatchPattern=myosi_@v_%a+@l-@d.efi \
+             myosi_@v_%a+@l.efi \
+             myosi_@v_%a.efi
+Mode=0644
+TriesLeft=3
+TriesDone=0
+InstancesMax=2

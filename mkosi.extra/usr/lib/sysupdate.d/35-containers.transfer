@@ -1,0 +1,27 @@
+[Transfer]
+# Feature-gated sysext transfer living in the MAIN sysupdate.d dir (not a
+# separate component) so base root/verity/UKI and every enabled sysext
+# share one @v generation: sysupdate never offers a version unless ALL
+# active transfers have assets for it — atomic base+sysext updates.
+Features=containers
+# Protect the booted generation's sysext from vacuum (InstancesMax=2
+# keeps current + new side by side for A/B rollback).
+ProtectVersion=%A
+# See 10-root.transfer for the Verify=/url-file rationale.
+Verify=false
+
+[Source]
+Type=url-file
+Path=https://github.com/aboglioli/myosi/releases/latest/download/
+MatchPattern=containers_@v_%a.raw
+
+[Target]
+Type=regular-file
+# Versioned store OUTSIDE systemd-sysext's discovery paths (it scans only
+# /etc, /run, /var/lib extensions dirs and merges EVERY image it finds —
+# no version selection). myosi-sysext-select links exactly one version
+# per sysext (the one matching the booted IMAGE_VERSION) into
+# /var/lib/extensions at boot and on every sysext refresh.
+Path=/var/lib/myosi/extensions
+MatchPattern=containers_@v_%a.raw
+InstancesMax=2

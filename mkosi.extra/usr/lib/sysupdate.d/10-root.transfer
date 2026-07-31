@@ -1,9 +1,23 @@
 [Transfer]
 ProtectVersion=%A
+# Verify=false: sysupdate's GPG verification covers only the SHA256SUMS
+# manifest (payload hashes are ALWAYS checked against it). The artifacts
+# authenticate themselves — root/verity carry a PKCS#7 verity signature
+# validated by the kernel .platform keyring at boot, the UKI is
+# SecureBoot-signed — and the manifest travels over HTTPS. Flip to GPG
+# later by signing SHA256SUMS.gpg in CI and shipping the public key at
+# /etc/systemd/import-pubring.pgp.
+Verify=false
 
 [Source]
-Type=regular-file
-Path=/var/lib/sysupdate
+# Public GitHub release, native sysupdate fetch: the URL is suffixed
+# with /SHA256SUMS (version enumeration + payload hashes) and the asset
+# names listed in the manifest. GitHub's 302 to
+# objects.githubusercontent.com is followed. Only the LATEST release is
+# visible through this URL — fine, sysupdate only ever installs the
+# newest complete version.
+Type=url-file
+Path=https://github.com/aboglioli/myosi/releases/latest/download/
 # @u captures the PartitionUUID embedded in the filename (first 16 bytes
 # of the verity root hash) and writes it into the target GPT entry. This
 # is mandatory: veritysetup-generator derives the expected PARTUUID from

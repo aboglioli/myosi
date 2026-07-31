@@ -1,9 +1,11 @@
 [Transfer]
 ProtectVersion=%A
+# See 10-root.transfer for the Verify=/url-file rationale.
+Verify=false
 
 [Source]
-Type=regular-file
-Path=/var/lib/sysupdate
+Type=url-file
+Path=https://github.com/aboglioli/myosi/releases/latest/download/
 # `@u` captures the GPT PartitionUUID for the verity hash partition
 # — the LAST 16 bytes of the dm-verity root hash rendered as a UUID
 # (per the Discoverable Partitions Spec). Same rationale as
