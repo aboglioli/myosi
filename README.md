@@ -149,11 +149,12 @@ files referenced; this is the operator/contributor map.
 | `/usr/lib/extensions/` | Documented by systemd as a sysext location but in practice systemd-sysext does NOT scan it for discovery on F44 / systemd 259. Do not bake new sysexts here. | (avoid) |
 | `/etc` | Persistent btrfs subvolume on `data-luks` (`/dev/mapper/data` `subvol=/etc`). Seeded from the verity-baked `/usr/share/factory/etc` factory tree on first boot by `myosi-etc-seed.service` (initrd; `cp -a --reflink=auto /sysroot/usr/share/factory/etc/. /sysroot/etc/` + `setfattr etc_t /sysroot/etc`). Every write lands directly in the subvol and persists across image upgrades. | Operator-mutable. |
 | `/usr/share/factory/etc/` | The verity-baked factory `/etc` tree. `mkosi.finalize` snapshots the build-settled `/etc` here then wipes the sealed-root `/etc` mountpoint. Read by `myosi-etc-seed.service` only on first boot — once the subvol is populated, new files added to `/usr/share/factory/etc` in later images are NOT auto-merged into `/etc` (operator owns `/etc` after first boot, bootc/ostree-style). Use `diff -ruN /etc /usr/share/factory/etc` to spot drift after upgrades. | Image-coupled. |
-| `/var/lib/extensions/` | The discovery path systemd-sysext actually scans. Operator-installed sysexts (via sysupdate or manual drop) live here as regular files. Image-baked baselines are materialized here as symlinks → `/usr/share/myosi/extensions/` by `sysext-baked-sync`. | Operator-mutable + sync-managed. |
+| `/var/lib/myosi/extensions/` | Versioned sysext store, filled by sysupdate (`InstancesMax=2`: current + previous generation). NOT a sysext discovery path. | sysupdate-managed. |
+| `/var/lib/extensions/` | The discovery path systemd-sysext actually scans. `sysext-select` links exactly ONE version per sysext here (from the store or the baked baselines) — the one matching the booted `IMAGE_VERSION`. Operator-dropped regular files override selection for their sysext name. | Selector-managed + operator-mutable. |
 | `/etc/extensions/`, `/run/extensions/` | Additional sysext discovery paths (rare). | Operator-mutable. |
 | `/srv`, `/mnt` → `var/mnt` | `/srv` is a dedicated btrfs subvolume from `data-luks`; `/mnt` is symlinked into writable `/var`. | `/srv` and `/mnt` targets are operator-mutable. |
 | `/var/lib/machines/` | Per-machine btrfs subvolumes for `systemd-nspawn` containers managed by `machinectl`. | Operator-mutable. |
-| `/usr/libexec/myosi/` | Shipped helper scripts (`sysext-modules-refresh`, `homed-user-provision`, `sysext-baked-sync`, `install`, `lib.sh`). | Image-coupled. |
+| `/usr/libexec/myosi/` | Shipped helper scripts (`sysext-modules-refresh`, `homed-user-provision`, `sysext-select`, `install`, `lib.sh`). | Image-coupled. |
 
 ### systemd-sysext discovery, multi-version merge, and baselines
 
@@ -171,23 +172,28 @@ sit alongside `name_V2.raw` in the discovery dir means the merged
 `/usr` has overlapping contents from both layers, with hard-to-predict
 precedence.
 
-myosi handles this with a two-tier model:
+myosi handles this with a store + selector model:
 
 1. **Image-baked baselines** live at `/usr/share/myosi/extensions/`
-   (verity-immutable, atomic swap on image upgrade — no `/etc`
-   overlay copy-up).
-2. **`sysext-baked-sync`** runs as `ExecStartPre=` of
+   (verity-immutable, atomic swap on image upgrade).
+2. **The sysupdate store** at `/var/lib/myosi/extensions/` holds
+   VERSIONED raws (`<name>_<VER>_<ARCH>.raw`, `InstancesMax=2` — the
+   current and the staged/previous generation side by side). Both dirs
+   are outside sysext's scan paths on purpose.
+3. **`sysext-select`** runs as `ExecStartPre=` of
    `systemd-sysext.service` on every boot and every `systemd-sysext
-   refresh`. It symlinks each baked raw into `/var/lib/extensions/`
-   and removes stale-version + dangling symlinks left over from
-   previous image versions.
-3. **Operator-installed raws** (sysupdate-fetched, manually-dropped)
-   live in `/var/lib/extensions/` as regular files. The sync script
-   never touches regular files — operator's content is preserved.
+   refresh`. Per sysext name it links exactly ONE raw into
+   `/var/lib/extensions/`: the version matching the booted image's
+   `IMAGE_VERSION`, falling back to the newest present (with a journal
+   warning). Stale managed symlinks are pruned.
+4. **Operator-dropped regular files** in `/var/lib/extensions/` are
+   never touched and suppress selection for that sysext name.
 
-This decouples "what ships with the image" (baselines) from "what the
-operator added or updated" (regular files), while keeping a single
-discovery path that systemd-sysext actually scans.
+This is what makes sysext updates A/B-shaped: sysupdate stages the new
+generation's raws next to the current ones, the reboot into the new
+root slot selects the new sysexts, and a rollback (sd-boot menu or
+boot-counting) into the old slot re-selects the old sysexts — kernel
+modules always match the booted kernel.
 
 ### Kernel-module sysexts + the depmod overlay
 
@@ -244,7 +250,7 @@ What this means at image upgrade time:
 Concrete bite (carried over from the retired overlay model): an old
 image baked the fleet-keys sysext under `/usr/share/factory/etc/extensions/`. After
 upgrading to a newer image that no longer bakes there, the stale
-`.07` raw is still resident at `/etc/extensions/` — `sysext-baked-sync`
+`.07` raw is still resident at `/etc/extensions/` — `sysext-select`
 prevents it from re-merging via `/var/lib/extensions/`, but a manual
 `rm -rf /etc/extensions/*.raw` clears the file itself.
 
@@ -370,8 +376,8 @@ Trade-off:
 |---|---|
 | `/usr/share/myosi/version` | Image metadata (name, version, build date, git commit, Fedora release, kernel uname). NOT a bootc reference — myosi assembles from RPMs directly. |
 | `/efi/EFI/Linux/myosi_<VER>_<ARCH>.efi` | UKIs. `InstancesMax=2` keeps two on the ESP for rollback. |
-| `/var/lib/sysupdate/` | sysupdate's local staging dir for fetched root/verity/UKI artifacts before they land in their target slots. |
-| `/var/lib/extensions/<name>_<VER>_<ARCH>.raw` | sysext discovery — either a symlink to baseline or an operator-installed regular file. |
+| `/var/lib/myosi/extensions/<name>_<VER>_<ARCH>.raw` | versioned sysext store (sysupdate target, current + previous generation). |
+| `/var/lib/extensions/<name>_<VER>_<ARCH>.raw` | sysext discovery — a `sysext-select`-managed symlink into the store/baselines, or an operator-installed regular file. |
 
 ### Enabling units without presets: `Wants=`, not `Upholds=`
 
@@ -616,8 +622,8 @@ blocks 5-10 min on slow CPUs / emulated TPM during LUKS format.
    create --identity=/usr/share/myosi/users/user.user
    --storage=luks ...` with the `changeme` bootstrap password via
    `PASSWORD`/`NEWPASSWORD` env vars.
-3. Operator SSHes in as root via fleet-keys → either logs in directly
-   as user (also via fleet-keys, no password needed) or runs
+3. Operator logs in as user (console with `changeme`, or SSH publickey
+   if a key was provisioned via one of the four sshd sources) and runs
    `homectl passwd user` to rotate the bootstrap password.
 4. (Optional) Operator runs `sudo loginctl enable-linger user`
    if they want rootless quadlets to keep running across reboots.
@@ -632,10 +638,10 @@ blocks 5-10 min on slow CPUs / emulated TPM during LUKS format.
 | `/etc/shadow` `root` | locked (`!locked`) — no password | Console login as root refused until operator sets one |
 | `/etc/ssh/sshd_config.d/50-myosi.conf` | `PermitRootLogin prohibit-password` | Root SSH allowed via publickey only — no password method |
 | baked authorized_keys | typically provisioned for `user`, not `root` | Root SSH won't work in prod until a root key is shipped (overlay, `/etc` drop-in, or credential) |
-| `user` | created by homed (subvol), `changeme` password, all fleet keys | Default login path on every host |
+| `user` | created by homed, `changeme` password | Default login path on every host |
 
-So out of the box, only **user** can log in (SSH publickey via
-fleet-keys, OR console with `changeme`). `sudo` works from there.
+So out of the box, only **user** can log in (console with `changeme`,
+OR SSH publickey if a key was provisioned). `sudo` works from there.
 
 **Upgrading user's home to LUKS + TPM2 (single-host, console-driven):**
 
@@ -676,8 +682,8 @@ loginctl enable-linger user
 PASSWORD=changeme homectl activate user  # use the current user password
 
 # Step 4 (optional, recommended) — re-lock root so password login goes
-# back off. Root SSH-as-key still works if you've added a fleet-keys
-# entry for root.
+# back off. Root SSH-as-key still works if you've provisioned a root
+# key via any of the sshd sources.
 passwd -l root
 ```
 
@@ -723,7 +729,7 @@ homectl unlock user                  # unlock after suspend
 
 ```bash
 # TPM2 PCR changed (firmware update, secureboot key swap) → auto-unlock fails.
-# SSH in (key auth works via fleet-keys), PAM falls back to passphrase
+# SSH in (key auth still works if provisioned), PAM falls back to passphrase
 # prompt on PTY, type passphrase, then:
 homectl update user --tpm2-device=auto --tpm2-pcrs=7+14
 
@@ -970,16 +976,9 @@ sudo systemd-cryptenroll --wipe-slot=recovery "$DEV"
 
 #### 3e. Enable sysext features
 
-Sysexts are signed `.raw` images that merge into `/usr`. Each optional feature is disabled until the host opts in. The helper writes the feature drop-in, downloads only the requested GitHub release asset, installs it in `/var/lib/extensions`, and refreshes the sysext overlay. With no explicit version, it installs the sysext matching the running host's `IMAGE_VERSION`.
+Sysexts are signed `.raw` images that merge into `/usr`. Each optional feature is disabled until the host opts in. The helper writes the feature drop-in (`/etc/sysupdate.d/<name>.feature.d/enable.conf`), downloads the release asset for the BOOTED image's `IMAGE_VERSION` (public repo, plain HTTPS — no GitHub auth needed) into the versioned store at `/var/lib/myosi/extensions/`, and refreshes the sysext overlay (`sysext-select` links the matching version into `/var/lib/extensions/`). From then on `myosi update` moves the sysext forward in lockstep with the base image.
 
-First authenticate GitHub CLI once:
-
-```bash
-gh auth login
-gh auth status
-```
-
-Then enable the features this host needs:
+Enable the features this host needs:
 
 ```bash
 sudo myosi extension-enable containers     # podman, distrobox, skopeo, incus
@@ -1011,7 +1010,7 @@ sudo systemd-sysext list
 
 #### 3f. Update base system and sysexts
 
-Updates are cache-first because the source repository is private. `updatectl` installs from local files in `/var/lib/sysupdate`; `myosi update` fetches those files from GitHub with authenticated `gh`.
+The repo is public: `systemd-sysupdate` fetches straight from the GitHub release (`url-file` sources — the release's `SHA256SUMS` manifest enumerates versions, payload hashes are verified unconditionally, GitHub's asset redirects are followed). No `gh` auth, no local staging step.
 
 Recommended all-in-one update:
 
@@ -1020,39 +1019,17 @@ sudo myosi update
 sudo reboot
 ```
 
-That resolves the latest GitHub release once, downloads that exact version, then applies that same version to:
+One `systemd-sysupdate update` run covers the whole generation atomically: base root + verity + verity-sig + every feature-enabled sysext share one version identifier in `/usr/lib/sysupdate.d/`, and sysupdate never offers a version unless ALL of those transfers have assets for it. The UKI transfer is numbered last (`90-uki.transfer`) so the entry point is written only after everything else landed. Machine DDIs (`mybox`) update as a separate `machines` component in the same command.
 
-```text
-host                  # A/B root + verity + UKI
-component:extensions  # enabled sysext features (includes fleet-keys)
-```
+Updates stage only: the new root lands in the inactive A/B slot, the new UKI on the ESP with boot-counting armed (`+3` tries — sd-boot rolls back to the previous UKI/slot after repeated boot failures, `systemd-bless-boot` blesses a healthy boot), and new sysext versions land in the store at `/var/lib/myosi/extensions/` WITHOUT touching the running overlay — `sysext-select` keeps the booted image's versions merged until you reboot into the new slot. Rollback works the same way in reverse: booting the old slot re-selects the old sysexts.
 
-Split fetch/apply flow:
+If you intentionally want live extension activation without rebooting:
 
 ```bash
-sudo myosi fetch          # latest release
-sudo myosi apply          # latest cached candidate
-
-sudo myosi fetch 2026.06.04.01
-sudo myosi apply 2026.06.04.01
-```
-
-`fetch`, `apply`, and `update` stage updates only. They do not refresh the running sysext layer. Reboot is the normal activation path and keeps the root image, UKI, and sysexts in one matching generation.
-
-If you intentionally want live extension activation without rebooting, use the explicit refresh mode:
-
-```bash
-sudo myosi apply 2026.06.04.01 true
 sudo myosi update --refresh
 ```
 
-That runs `systemd-sysext refresh` after `updatectl` applies the cached artifacts. It does not restart arbitrary services; restart affected daemons manually. Prefer reboot for root-coupled or kernel-module sysexts such as NVIDIA and ZFS.
-
-Manual equivalent:
-
-```bash
-sudo systemd-sysext refresh
-```
+That runs `systemd-sysext refresh` after staging. Note the refresh re-runs `sysext-select`, which keeps the BOOTED image's sysext versions active — a newer generation activates at reboot. Prefer reboot for root-coupled or kernel-module sysexts such as NVIDIA and ZFS.
 
 Inspect or clean old generations:
 
@@ -1061,53 +1038,43 @@ sudo myosi status
 sudo myosi vacuum
 ```
 
-The base update writes the inactive A/B slot and the new UKI. The current root remains unchanged until reboot even when `--refresh` is used. sd-boot boot counting tries the new entry and rolls back if it fails repeatedly.
-
 The transfer definitions live in:
 
 ```text
-/usr/lib/sysupdate.d/            # host root, verity, verity signature, UKI
-/usr/lib/sysupdate.extensions.d/ # sysext features (incl. fleet-keys)
+/usr/lib/sysupdate.d/            # host root, verity, verity-sig, UKI + sysext features (one @v generation)
+/usr/lib/sysupdate.machines.d/   # machine DDIs (mybox), separate component
 ```
 
-All of them read from:
-
-```text
-/var/lib/sysupdate
-```
+Pinning: the `url-file` source sees only the LATEST release (`releases/latest/download/`), so `myosi update VERSION` works only when VERSION is the latest. To roll back, boot the previous slot from the sd-boot menu; to install a specific sysext version, use `myosi extension-enable NAME VERSION` (direct per-tag download).
 
 #### 3h. Manual sysext install without `extension-enable`
 
 Use this only for debugging or one-off installs. The normal path is `extension-enable`.
 
 ```bash
-gh auth login
-VERSION="$(gh release view --repo user/myosi --json tagName --jq .tagName)"
+# The version must match the booted image (kmod sysexts must match the
+# running kernel; sysext-select prefers the booted IMAGE_VERSION).
+VERSION="$(. /usr/lib/os-release && echo "$IMAGE_VERSION")"
+ARCH=x86-64
 EXT=containers
-mkdir -p /tmp/myosi-ext
 
-gh release download "$VERSION" \
-  --repo user/myosi \
-  --pattern "${EXT}_${VERSION}.raw" \
-  --dir /tmp/myosi-ext \
-  --clobber
+curl -fL -o "/tmp/${EXT}_${VERSION}_${ARCH}.raw" \
+  "https://github.com/aboglioli/myosi/releases/download/${VERSION}/${EXT}_${VERSION}_${ARCH}.raw"
 
-sudo mkdir -p /var/lib/extensions
-sudo install -m 0644 \
-  "/tmp/myosi-ext/${EXT}_${VERSION}.raw" \
-  "/var/lib/extensions/${EXT}_${VERSION}.raw"
+sudo install -D -m 0644 \
+  "/tmp/${EXT}_${VERSION}_${ARCH}.raw" \
+  "/var/lib/myosi/extensions/${EXT}_${VERSION}_${ARCH}.raw"
 
-sudo systemctl enable systemd-sysext.service
-sudo systemctl restart systemd-sysext.service || sudo reboot
+sudo systemctl restart systemd-sysext.service   # runs sysext-select, merges
 systemd-sysext list
 ```
 
-To make sysupdate keep that sysext updated later, enable the feature gate too:
+To make sysupdate keep that sysext updated in lockstep later, enable the feature gate too:
 
 ```bash
-sudo mkdir -p "/etc/sysupdate.extensions.d/${EXT}.feature.d"
+sudo mkdir -p "/etc/sysupdate.d/${EXT}.feature.d"
 printf '[Feature]\nEnabled=true\n' | \
-  sudo tee "/etc/sysupdate.extensions.d/${EXT}.feature.d/enable.conf"
+  sudo tee "/etc/sysupdate.d/${EXT}.feature.d/enable.conf"
 
 sudo myosi update
 ```
@@ -1321,7 +1288,7 @@ sudo btrfs filesystem usage /var
 sudo btrfs subvolume list /var
 
 # Update state
-sudo myosi update status
+sudo myosi status
 
 # Signature validation failures
 sudo dmesg | grep -iE 'verity|enokey' || true
@@ -1459,28 +1426,26 @@ alias etconly='diff -rq /usr/share/factory/etc /etc | grep "^Only in" | sort'
 
 ---
 
-## Updates (cache-first sysupdate)
+## Updates (native sysupdate over GitHub Releases)
 
 The deployed update interface is:
 
 ```bash
-sudo myosi update [VERSION]
-sudo myosi update --refresh [VERSION]
+sudo myosi update
+sudo myosi update --refresh
 ```
 
-No version means latest GitHub release. An explicit version pins the fetch and apply to that version. This is the supported path for base A/B updates, enabled and enabled sysexts.
+By default, updates are staged only. Reboot activates the new root, UKI, and sysexts together. `--refresh` is an explicit live-extension mode: it refreshes the active sysext overlays after staging, but `sysext-select` keeps the booted generation's versions merged, and it does not change the running root or restart affected services.
 
-By default, updates are staged only. Reboot activates the new root and sysexts together. `--refresh` is an explicit live-extension mode for `update`: it refreshes the active sysext overlays after staging, but it does not change the running root or restart affected services.
+Under the hood, `myosi update` is a thin wrapper over the native mechanism:
 
-Under the hood:
+1. `systemd-sysupdate update` reads `/usr/lib/sysupdate.d/` — `url-file` sources pointing at `https://github.com/aboglioli/myosi/releases/latest/download/`.
+2. sysupdate downloads the release's `SHA256SUMS` manifest, enumerates versions from the asset filenames (`@v`), and only offers a version complete across the base transfers AND every enabled sysext feature — one atomic generation.
+3. Payloads are downloaded (GitHub's redirects followed) and verified against the manifest hashes unconditionally; the artifacts additionally self-authenticate at boot (dm-verity signatures against the kernel `.platform` keyring, SecureBoot-signed UKI). `Verify=false` skips only the optional GPG signature on the manifest itself — flip it on later by shipping `SHA256SUMS.gpg` + `/etc/systemd/import-pubring.pgp`.
+4. Root/verity/verity-sig land in the inactive A/B slot, sysext raws in the versioned store, and the UKI last (`90-uki.transfer`) with boot-counting armed (`+3` tries; `systemd-bless-boot` blesses a good boot, sd-boot falls back to the previous entry otherwise).
+5. `systemd-sysupdate --component=machines update` handles opt-in machine DDIs (mybox) the same way.
 
-1. `gh release view` resolves the version.
-2. `gh release download` fetches artifacts into `/var/lib/sysupdate`.
-3. `sha256sum -c SHA256SUMS --ignore-missing` catches incomplete downloads.
-4. `updatectl update host@VERSION` writes the inactive A/B root slot + UKI.
-5. `updatectl update component:extensions@VERSION` updates enabled sysexts (including fleet-keys).
-
-Do not point transfer files directly at GitHub URLs; the repository is private and sysupdate has no GitHub authentication. GitHub CLI authentication is intentionally isolated to `myosi update`.
+Automatic updates: the stock `systemd-sysupdate.timer` can drive the same definitions unattended — enable it per host with `systemctl enable --now systemd-sysupdate.timer` (reboot remains manual).
 
 ## Filesystem maintenance (LUKS + btrfs, two nesting levels)
 
@@ -1643,7 +1608,7 @@ Only `/var`, `/home`, and persistent `/etc` are unique host state. The signed ro
 - `/var/lib/incus` — Incus instances and images
 - `/etc` — local config (hostname, NetworkManager state, sshd keys, crypttab additions, etc.); now a first-class persistent btrfs subvol on `data-luks`
 - `/var/lib/extensions` — installed sysext images
-- `/var/lib/sysupdate/` — cached release assets downloaded by `myosi update`
+- `/var/lib/myosi/extensions/` — versioned sysext store (re-downloadable, but saves a fetch on restore)
 - LUKS recovery passphrase — store outside the machine; TPM2 is convenience, not backup
 
 **Recovery paths:**
@@ -1675,7 +1640,7 @@ Hashes are baked into `mkosi.extra/etc/shadow` (sha-512 + deterministic salt for
 `sysusers.d` has **no password column** in its format (6 fields: `TYPE NAME ID GECOS HOME SHELL`), so the only declarative path for shipping a default password is `/etc/shadow` itself. A 7th column triggers `Trailing garbage.` from `systemd-sysusers` and the entry is dropped — verified the hard way during the password-bootstrap refactor.
 
 **Bootstrap flow on a fresh install:**
-1. SSH in as `user` via a `fleet-keys` sysext-shipped public key.
+1. Log in as `user` — console with `changeme`, or SSH publickey if a key was provisioned (private overlay, `/etc` drop-in, or credential).
 2. `sudo passwd root` — sudo asks for user's password (`changeme`), then sets a real root password.
 3. `passwd` — set a real user password.
 
@@ -1760,7 +1725,8 @@ max-zram-size = 16384     # capped at 16 GiB
 
 Built from `mkosi.conf` `KernelCommandLine=`. Highlights:
 - `rd.systemd.verity=1` + `systemd.verity_root_options=panic-on-corruption,restart-on-corruption`
-- `rd.luks.options=tpm2-device=auto,discard` + `rd.luks.timeout=120`
+- `systemd.image_policy=root=signed:var=encrypted:=ignore` + `systemd.image_filter=root=root-*:var=data-*`
+- `rd.luks.options=key-file=/usr/share/myosi/keys/data.key,discard` + `rd.luks.timeout=120`
 - `lockdown=integrity module.sig_enforce=1 init_on_alloc=1 init_on_free=1 slab_nomerge`
 - `mitigations=auto,nosmt page_alloc.shuffle=1 randomize_kstack_offset=on vsyscall=none debugfs=off`
 - `selinux=1 enforcing=1`
@@ -1768,7 +1734,7 @@ Built from `mkosi.conf` `KernelCommandLine=`. Highlights:
 - `iommu=pt intel_iommu=on amd_iommu=on` (vendor-agnostic, kernel ignores wrong vendor)
 - `module_blacklist=nouveau,nova_core,iTCO_wdt,iTCO_vendor_support,sp5100_tco` — single source of truth for "this module never loads" policy. UKI cmdline is the canonical home; modprobe.d files inside sysexts carry MODULE OPTIONS only.
 - `transparent_hugepage=madvise`
-- `quiet loglevel=3 console=ttyS0,115200n8 console=tty0`
+- Verbose boot: no `quiet`, `loglevel=4`, `rd.systemd.show_status=true systemd.show_status=true`, `console=tty0` only (qemu adds `console=ttyS0` via mkosi.local.conf)
 - `audit=0` (SELinux covers most of it)
 
 ---
@@ -1799,18 +1765,17 @@ just install /dev/nvme0n1 /dev/sdb   # clone the booted USB onto NVMe
 
 The `myosi` wrapper only handles **myosi-specific orchestration**: sysupdate (GitHub releases), sysext feature management, and the install script. Everything else (LUKS keyslots, btrfs subvols, snapshots, portable services, credentials) is run with the upstream tool directly — see the post-install runbook (under Installing to real hardware) for the manual commands.
 
-The wrapper scans `/usr/share/myosi/just/` (base modules `00-update.just`, `10-extensions.just`, `40-install.just`) and any sysext-provided modules (e.g. `50-virt.just`) at every invocation, emitting a transient justfile in `/run/myosi/`. Sysexts can add their own operator commands without the base image knowing about them. Run `myosi --list` to see what's currently available.
+The wrapper scans `/usr/share/myosi/just/` (base modules `00-update.just`, `10-extensions.just`, `11-machines.just`, `40-install.just`) and any sysext-provided modules (e.g. `50-virt.just`) at every invocation, emitting a transient justfile in `/run/myosi/`. Sysexts can add their own operator commands without the base image knowing about them. Run `myosi --list` to see what's currently available.
 
 ```bash
 sudo myosi extension-enable   NAME [VERSION]   # enable a sysext feature
 sudo myosi extension-disable  NAME             # disable a sysext feature
 sudo myosi extension-list                      # installed + active sysext
-sudo myosi update              [VERSION]       # fetch + apply
-sudo myosi update --refresh    [VERSION]       # fetch + apply + live sysext refresh
-sudo myosi fetch               [VERSION]       # fetch release artifacts
-sudo myosi apply               [VERSION]       # apply cached artifacts
+sudo myosi update                              # stage base + sysexts + machines (systemd-sysupdate)
+sudo myosi update --refresh                    # …plus live sysext refresh
 sudo myosi status                              # update + sysext state
 sudo myosi vacuum                              # remove old generations
+sudo myosi machine-enable     NAME [VERSION]   # enable a machine DDI (mybox)
 sudo myosi install             /dev/sdX [SRC]  # write a release to disk
 ```
 
@@ -1911,7 +1876,7 @@ sudo systemd-sysext list
 ### OpenZFS sysext doesn't compile after a kernel/Fedora bump
 - OpenZFS upstream typically trails new kernels by 2-6 weeks. The build script uses an upstream-tarball flow (`mkosi.shared/zfs-build.sh`) with `ZFS_VERSION` env var pointing at the GitHub release tag. Two recovery paths:
   - **Bump `ZFS_VERSION`** in `zfs-build.sh` once OpenZFS publishes a release whose META `Linux-Maximum` covers the new kernel. One-line change.
-  - **`ZFS_BUILD_OPTIONAL=1` in CI**, which makes `dnf install`, tarball fetch, configure, and rpmbuild failures non-fatal. The postinst exits 0 with an empty sysext stub; CI keeps shipping every other artifact and deployed hosts stay on their last working zfs sysext via systemd-sysext version precedence.
+  - **`ZFS_BUILD_OPTIONAL=1`**, which makes `dnf install`, tarball fetch, configure, and rpmbuild failures non-fatal (empty sysext stub, exit 0). NOT set in CI releases on purpose: base + sysext transfers share one sysupdate generation, so a release missing the zfs asset would be silently invisible to every host with the zfs feature enabled — a loud CI failure is the better trade. Use it for local builds while waiting on upstream.
 
 ### `just build` from distrobox errors `"You must run systemctl inside a container!"`
 - A symlink from `distrobox-host-exec` to `systemctl` was misdirecting. Remove the symlink; mkosi calls real systemd via `distrobox-host-exec systemctl`.
@@ -1939,13 +1904,13 @@ dm-verity provides partition-level Merkle-tree signing — the whole root data p
 sysusers.d `u` type only accepts UIDs in the system range (< 1000). Asking for UID 1000 silently falls back to auto-allocation + locked password + nologin shell. Shipping `/etc/shadow` with the hash works the same way `myos` does in its bootc image. sysusers still creates the user (UID, groups, shell), preserving the shipped hash.
 
 **Why ship baseline config in `/etc/`?**
-sshd, sudo, podman, NetworkManager, and firewalld read their active config from `/etc/`. myosi therefore seeds security-sensitive defaults in `mkosi.extra/etc/` as the verity-protected baseline, `mkosi.finalize` snapshots that baseline to `/usr/share/factory/etc` (the verity-baked factory tree), and `myosi-etc-seed.service` copies it into the empty `/etc` subvol on first boot only. Subsequent boots skip the seed (`ConditionDirectoryNotEmpty=!/sysroot/etc` gate); operator owns `/etc` afterwards. Reusable signed configuration ships as sysexts under `/usr` instead of stacking a confext layer (see `fleet-keys`).
+sshd, sudo, podman, NetworkManager, and firewalld read their active config from `/etc/`. myosi therefore seeds security-sensitive defaults in `mkosi.extra/etc/` as the verity-protected baseline, `mkosi.finalize` snapshots that baseline to `/usr/share/factory/etc` (the verity-baked factory tree), and `myosi-etc-seed.service` copies it into the empty `/etc` subvol on first boot only. Subsequent boots skip the seed (`ConditionDirectoryNotEmpty=!/sysroot/etc` gate); operator owns `/etc` afterwards. Reusable signed configuration ships as sysexts under `/usr` instead of stacking a confext layer.
 
 **Why `vm.swappiness=180`?**
 zram is always-on. Swap pages go to zstd-compressed RAM, not disk. Aggressive swappiness is correct in that regime. Without zram, 180 would thrash to disk; with it, you get effective memory compression.
 
 **Why one base image instead of per-host images like myos?**
-A slim signed base + per-host opt-in sysexts means every host runs the same updateable artifact. Per-host images multiply the update + signing surface. Host identity lives in the persistent `/etc` btrfs subvol on `data-luks`; reusable signed configuration ships as additional sysexts under `/usr` (e.g. `fleet-keys`).
+A slim signed base + per-host opt-in sysexts means every host runs the same updateable artifact. Per-host images multiply the update + signing surface. Host identity lives in the persistent `/etc` btrfs subvol on `data-luks`; reusable signed configuration ships as additional sysexts under `/usr`.
 
 **Why pasta instead of slirp4netns for rootless podman?**
 slirp4netns works but is slow, IPv6-limited, and the legacy default. pasta (passt) is faster (kernel-based packet shuttling), has full IPv6 support, and is the default in podman 5.x+. Configured via `default_rootless_network_cmd = "pasta"` in `/etc/containers/containers.conf`. myos uses slirp4netns — myosi deliberately diverges.
@@ -1994,10 +1959,10 @@ Intentional. `myosi` is an atomic, signed OS — installing arbitrary user-space
 | **v1.8: locked root + bootstrap via user sudo** | ✅ done — root ships `!locked` in shadow; user has `changeme`. First-login `sudo passwd root` sets a real root password. Image never ships a known root credential. |
 | **v1.9: incremental build mode** | ✅ done — `just build` runs `mkosi -fi` for fast local iteration; `just build full` runs `mkosi -ff` for clean releases; CI workflow pinned to full. |
 | **v2: real-hardware install** | ⬜ pending — dd → USB → install → boot a sacrificial target |
-| **v3: sysupdate end-to-end** | ✅ done — GitHub releases are fetched by `myosi update` into `/var/lib/sysupdate`, then applied by updatectl from local files. |
+| **v3: sysupdate end-to-end** | ✅ done — `systemd-sysupdate` fetches straight from the public GitHub release (`url-file` + `SHA256SUMS`); base + enabled sysexts update as one atomic generation, machines as a separate component. |
 | **v4: TPM2 enrollment + dual SecureBoot validation** | ⬜ pending |
 | **v5: fleet rollout** | ⬜ pending — replace `myos` on remaining hosts |
-| **v6: public artifact store decision** | ✅ deferred by design — no public artifact store required. Private GitHub access stays in the `gh`-backed cache fetcher; sysupdate consumes only local files. |
+| **v6: public artifact store decision** | ✅ resolved — the repo is public; GitHub Releases IS the artifact store, consumed natively by sysupdate (`releases/latest/download/` + manifest). The `gh`-backed cache fetcher is retired. |
 
 ---
 
@@ -2187,11 +2152,11 @@ mkosi ssh -- cat /proc/cmdline | tr ' ' '\n' | head -20
 
 mkosi ssh -- systemd-dissect --discover
 mkosi ssh -- veritysetup status root
-mkosi ssh -- mount | grep -E 'erofs|overlay|btrfs'
+mkosi ssh -- mount | grep -E 'erofs|btrfs'
 # Should show:
 #   /dev/mapper/root on / type erofs (ro,...)
-#   myosi-etc-overlay on /etc type overlay (rw,...)
-#   /dev/mapper/data on /var type btrfs (rw,...)
+#   /dev/mapper/data on /etc type btrfs (rw,...,subvol=/etc)
+#   /dev/mapper/data on /var type btrfs (rw,...,subvol=/var)
 
 mkosi ssh -- swapon --show
 # Should show: /dev/zram0 partition
@@ -2273,9 +2238,9 @@ dmsetup table root | head -1
 veritysetup status root
 # Should show:  VERITY    active
 
-# 3. /etc writable overlay
+# 3. /etc persistent btrfs subvolume
 findmnt /etc
-# Should show: overlay  myosi-etc-overlay  ... rw,relatime,lowerdir=...,upperdir=...,workdir=...
+# Should show: /etc  /dev/mapper/data[/etc]  btrfs  rw,...,subvol=/etc
 
 # 4. /usr read-only
 findmnt /usr
@@ -2286,7 +2251,8 @@ touch /usr/test 2>&1
 findmnt /var | grep btrfs
 findmnt /home | grep btrfs
 btrfs subvolume list /var
-# Should list: /var, /var/tmp, /var/cache, /var/log, /var/lib/containers, /home, ...
+# Should list the top-level subvolumes: var, etc, home, srv
+# (/var/tmp, /var/log, /var/lib/containers are plain dirs inside /var)
 
 # 6. zram active
 swapon --show
@@ -2455,17 +2421,22 @@ Supported credential names and their consumers are documented in
 | `firstboot.hostname` | systemd-firstboot | overrides baked `/etc/hostname` on first boot |
 | `passwd.hashed-password.root` | systemd-firstboot | sets root password (`mkpasswd -m sha512crypt`) |
 | `ssh.authorized_keys.root` | sshd (`AuthorizedKeysFile` includes `/run/credentials/...`) | adds keys without service restart |
-| `data.key` | initrd `systemd-repart.service` + `sysroot-prep.service` | LUKS2 key file for formatting and unlocking `data-luks` |
 
-Operator helpers ship in `/usr/share/myosi/just/35-credentials.just`:
+(data-luks unlock does NOT use a credential: the initrd
+`myosi-data-attach.service` probes the baked key file at
+`/usr/share/myosi/keys/data.key`, then falls through to TPM2/passphrase
+via `systemd-cryptsetup`.)
+
+Operators manage credentials with `systemd-creds` directly:
 
 ```bash
-# Encrypt + install (default seal is TPM2 if available, host-key otherwise):
-echo 'myhost-01' | sudo myosi credential encrypt firstboot.hostname
+# Encrypt + install (seal to TPM2 if available, host-key otherwise):
+echo 'myhost-01' | sudo systemd-creds encrypt --name=firstboot.hostname \
+    - /etc/credstore.encrypted/firstboot.hostname
 
 # Listing and removal:
-sudo myosi credential list
-sudo myosi credential remove firstboot.hostname
+sudo systemd-creds list
+sudo rm /etc/credstore.encrypted/firstboot.hostname
 ```
 
 ESP-delivered credentials (for the unified USB↔installed flow) work
@@ -2482,33 +2453,28 @@ their own `/etc` namespace. Examples: vendored proprietary services
 that need a different libc, services that ship internal `/etc`
 config and should not bleed into the host overlay.
 
-`/usr/share/myosi/just/45-portables.just` exposes operator helpers:
+Operators drive it with `portablectl` directly:
 
 ```bash
-sudo myosi portable stage /tmp/myservice.raw     # → /var/lib/portables/
-sudo myosi portable inspect myservice.raw        # signatures, units, content
-sudo myosi portable attach myservice --enable    # mount + enable units
-sudo myosi portable list                         # state
-sudo myosi portable detach myservice             # stop + unmount
+sudo install -m 0644 /tmp/myservice.raw /var/lib/portables/
+sudo portablectl inspect myservice.raw           # signatures, units, content
+sudo portablectl attach --enable myservice       # mount + enable units
+sudo portablectl list                            # state
+sudo portablectl detach myservice                # stop + unmount
 ```
 
-**confext support is rejected.** myosi's `/etc` overlay has exactly
-one writable upperdir (`/var/etc`). A confext layer would introduce a
-second image-shipped writable `/etc` overlay whose reconciliation
-rules with `/var/etc` are not well-defined (which side wins on
-conflict, what survives a confext detach, how sysupdate phases
-interact with a mid-overlay swap). To enforce the invariant:
-
-- `mkosi.postinst` masks `systemd-confext.service`. CI fails the
-  build if the mask is removed.
-- The fleet-keys image is deliberately a sysext (not a confext) even
-  though it carries only `/etc` files. Its tree merges under the
-  `/usr/share/factory/etc` lowerdir, so `/var/etc` still wins, and sysupdate
-  replaces the sysext as an atomic unit.
+**confext is dormant by default.** myosi's `/etc` is a persistent btrfs
+subvolume the operator owns after first boot. A confext layer would
+stack an image-shipped overlay on top of it, and the reconciliation
+rules (which side wins on conflict, what survives a confext detach, how
+sysupdate phases interact with an overlay swap) would need a design
+pass first. `systemd-confext.service` is therefore not preset-enabled —
+but also not masked; operators who accept those open questions can
+`systemctl enable --now systemd-confext.service`.
 
 Extensions are **sysexts** (`/usr` files), **portable services** (own
-`/etc` namespace), or **operator edits to `/var/etc`** (persistent
-per-host config). Nothing else.
+`/etc` namespace), or **operator edits to `/etc`** (persistent per-host
+config). Nothing else.
 
 ---
 
@@ -2526,13 +2492,10 @@ above; this section adds the multi-disk operator workflows.
 
 myosi's `/var` is a btrfs filesystem inside one LUKS container. It can be extended into a pool spanning multiple encrypted devices. Or you can create a separate pool mounted elsewhere (e.g. `/mnt/data`) for bulk storage.
 
-Three helpers are shipped under `/usr/libexec/myosi/`:
-
-| Helper | Purpose |
-|--------|---------|
-| `add-data-disk <device> [<label>]` | Encrypt a single extra disk and add it to the existing `/var` btrfs |
-| `convert-pool <profile> [<mountpoint>]` | Rebalance an existing btrfs pool to a target chunk profile |
-| `create-data-pool <mountpoint> <profile> <dev1> [<dev2> ...]` | Create a fresh encrypted btrfs pool spanning N disks, mounted somewhere |
+No wrapper scripts ship for this — the patterns below use `cryptsetup`,
+`systemd-cryptenroll`, and `btrfs` directly. The canonical single-disk
+commands live in section 3i (Encrypted btrfs data pool); this appendix
+composes them into multi-disk layouts.
 
 ### 2.1 Btrfs profile choices
 
@@ -2558,48 +2521,69 @@ Hosts with two NVMe drives (e.g. `/dev/nvme0n1` as the primary boot disk and `/d
 # Boot from primary install (see Installing to real hardware)
 # Then on the running system:
 
-# Add the second NVMe to /var
-sudo /usr/libexec/myosi/add-data-disk /dev/nvme1n1 data-nvme1
-#   Will prompt: confirm wipe, set LUKS passphrase, optional TPM2 enroll.
+# Encrypt the second NVMe with a data-N label (the pattern the initrd
+# myosi-data-attach scanner adopts as a pool member) and enroll TPM2
+# for unattended unlock — full rationale in section 3i.
+sudo wipefs -a /dev/nvme1n1
+sudo cryptsetup luksFormat --type luks2 --label data-1 --force-password /dev/nvme1n1
+sudo cryptsetup luksOpen /dev/nvme1n1 data-1
+sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7+14 /dev/nvme1n1
 
-# Verify
-sudo /usr/libexec/myosi/pool-status /var
-#   Should show TWO devices in the pool.
+# Add to the /var btrfs pool
+sudo btrfs device add /dev/mapper/data-1 /var
 
-# Use 'single' profile to keep full 3 TB usable capacity
-sudo /usr/libexec/myosi/convert-pool single /var
+# Verify — should show TWO devices in the pool
+sudo btrfs filesystem show /var
+
+# Use 'single' profile to keep full usable capacity
+sudo btrfs balance start -dconvert=single -mconvert=raid1 -sconvert=raid1 /var
 ```
 
-Boot persistence: `/etc/crypttab` gets a new line for the second LUKS device automatically. On the next boot both devices unlock (passphrase or TPM2). `/var` mounts only after both LUKS volumes are open.
+Boot persistence: no crypttab needed — the initrd `myosi-data-attach` discovers and unlocks every `data-N`-labeled LUKS container on any disk before `/var` mounts.
 
 ### 2.3 Pattern B: separate mirrored data pool for HDDs
 
 Hosts with extra SATA HDDs for bulk storage (e.g. `/dev/sda` and `/dev/sdb`) intended for redundant bulk storage. Mounted at `/mnt/data`:
 
 ```bash
-# Create a 2-disk raid1 pool (1 TB usable, mirrored)
-sudo /usr/libexec/myosi/create-data-pool /mnt/data raid1 /dev/sda /dev/sdb
-#   Confirms wipe, prompts for one LUKS passphrase per device,
-#   writes 2 lines to /etc/crypttab + 1 line to /etc/fstab,
-#   formats btrfs with raid1 data + metadata,
-#   mounts at /mnt/data.
+# Encrypt each device with a pool-* label (NOT data-N — these disks do
+# not gate /var, so they use operator-managed /etc/crypttab instead of
+# the initrd scanner) and register it for boot-time unlock:
+for D in /dev/sda /dev/sdb; do
+    L="pool-$(basename "$D")"
+    sudo wipefs -a "$D"
+    sudo cryptsetup luksFormat --type luks2 --label "$L" --force-password "$D"
+    sudo cryptsetup luksOpen "$D" "$L"
+    echo "$L  UUID=$(sudo cryptsetup luksUUID "$D")  none  discard" | \
+        sudo tee -a /etc/crypttab
+done
 
 # Optional TPM2 enrollment for unattended unlock on each disk
 sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7+14 /dev/sda
 sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7+14 /dev/sdb
 
+# Format btrfs raid1 across the mappers, mount via fstab
+sudo mkfs.btrfs -L pool -d raid1 -m raid1 /dev/mapper/pool-*
+sudo mkdir -p /mnt/data
+UUID=$(sudo blkid -s UUID -o value /dev/mapper/pool-sda)
+echo "UUID=$UUID  /mnt/data  btrfs  defaults,noatime,compress=zstd:3  0 0" | \
+    sudo tee -a /etc/fstab
+sudo systemctl daemon-reload
+sudo mount /mnt/data
+
 # Verify
-sudo /usr/libexec/myosi/pool-status /mnt/data
+sudo btrfs filesystem show /mnt/data
 ```
 
-Per-disk LUKS passphrases can be the same string (easier to remember) or distinct (slightly better blast-radius). Each one prompts separately during `create-data-pool`.
+Per-disk LUKS passphrases can be the same string (easier to remember) or distinct (slightly better blast-radius).
 
 ### 2.4 Pattern C: high-performance stripe (any host with 2 NVMes)
 
 For a pure performance setup where you accept the risk:
 
 ```bash
-sudo /usr/libexec/myosi/create-data-pool /mnt/fast raid0 /dev/nvme1n1 /dev/nvme2n1
+# Same encrypt + crypttab + fstab flow as Pattern B, then:
+sudo mkfs.btrfs -L fast -d raid0 -m raid1 /dev/mapper/pool-nvme1n1 /dev/mapper/pool-nvme2n1
 ```
 
 `raid0` doubles read/write throughput at the cost of any single-disk failure destroying the whole pool. Use only for caches, build artifacts, swap-like workloads.
@@ -2609,14 +2593,15 @@ sudo /usr/libexec/myosi/create-data-pool /mnt/fast raid0 /dev/nvme1n1 /dev/nvme2
 You can always add more disks to either `/var` or `/mnt/data` later:
 
 ```bash
-# Existing pool (e.g. /var), add a third disk
-sudo /usr/libexec/myosi/add-data-disk /dev/nvme2n1 data-nvme2
-sudo /usr/libexec/myosi/convert-pool raid1 /var      # raise redundancy when you have ≥ 3 disks
-# or
-sudo /usr/libexec/myosi/convert-pool single /var     # keep maximum capacity
+# Existing pool (e.g. /var), add a third disk: encrypt with the next
+# data-N label (Pattern A flow), then:
+sudo btrfs device add /dev/mapper/data-2 /var
+sudo btrfs balance start -dconvert=raid1 -mconvert=raid1 -sconvert=raid1 /var   # raise redundancy
+# or keep maximum capacity:
+sudo btrfs balance start -dconvert=single -mconvert=raid1 -sconvert=raid1 /var
 ```
 
-Capacity recomputes automatically. `convert-pool` rebalances live without unmounting.
+Capacity recomputes automatically. `btrfs balance` rebalances live without unmounting.
 
 ### 2.6 Removing a disk from a pool
 
@@ -2626,9 +2611,13 @@ Capacity recomputes automatically. `convert-pool` rebalances live without unmoun
 # Move all data off the device
 sudo btrfs device delete /dev/mapper/<label> /var
 
-# After completion, close LUKS and remove crypttab entry
+# After completion, close LUKS. For /var pool members (data-N) also
+# wipe the header — the initrd scanner adopts any present data-N label
+# as a mandatory boot-time pool member. For separate pools, remove the
+# /etc/crypttab line instead.
 sudo cryptsetup luksClose <label>
-sudo sed -i "/^<label>/d" /etc/crypttab
+sudo wipefs -a /dev/<device>                      # data-N pool member
+sudo sed -i "/^<label>/d" /etc/crypttab           # separate-pool device
 ```
 
 Reboot to confirm the device no longer appears in `/proc/mounts` / `btrfs filesystem show /var`.
@@ -2642,7 +2631,7 @@ Reboot to confirm the device no longer appears in `/proc/mounts` / `btrfs filesy
 | New base image update breaks boot | sd-boot boot-counter auto-rolls back after 3 failed boots. Manual: press space at sd-boot menu, pick the previous UKI. |
 | One data disk in `/var` raid0 fails | Pool is dead. Mount with `degraded` to attempt rescue, restore from backups. |
 | One data disk in `/var` raid1/raid10/raid1c3/raid1c4 fails | Boot with `rootflags=degraded` or add to the new disk's mount options, then `btrfs replace start` onto the new disk. |
-| `/etc` drift causing weird state | Boot rescue, mount `/var`, `rm -rf /var/etc/*`, reboot. Image defaults apply fresh. |
+| `/etc` drift causing weird state | Boot rescue, `mount /dev/mapper/data -o subvol=/ /mnt`, `find /mnt/etc -mindepth 1 -xdev -delete`, reboot. `myosi-etc-seed.service` re-seeds `/etc` from the factory tree. |
 | SecureBoot toggle invalidates TPM | TPM unlock fails → passphrase prompt. Re-enroll TPM2: `sudo systemd-cryptenroll --wipe-slot=tpm2 <luks> && sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7+14 <luks>`. |
 
 ## 4. Verifying a clean install
@@ -2651,7 +2640,7 @@ After all setup steps, sanity checks:
 
 ```bash
 # Sysext merged
-sudo /usr/libexec/myosi/extension-list
+sudo myosi extension-list
 
 # Verity root active
 findmnt /
@@ -2661,7 +2650,7 @@ findmnt /
 sudo dmsetup ls --target crypt
 
 # Pool layout
-sudo /usr/libexec/myosi/pool-status /var
+sudo btrfs filesystem show /var
 
 # Boot-counter blessed (no rollback pending)
 sudo systemctl status systemd-bless-boot.service
