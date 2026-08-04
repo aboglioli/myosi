@@ -79,10 +79,10 @@ status:
     fi
 
     echo "== sysext store (/var/lib/myosi/extensions) =="
-    find /var/lib/myosi/extensions -maxdepth 1 -type f -name '*.raw' -printf '  %f\n' 2>/dev/null | sort
+    find /var/lib/myosi/extensions -maxdepth 1 -type f -name '*.raw' -printf '  %f\n' 2>/dev/null | sort || true
     echo
     echo "== selected for merge (/var/lib/extensions) =="
-    find /var/lib/extensions -maxdepth 1 -name '*.raw' -printf '  %f\n' 2>/dev/null | sort
+    find /var/lib/extensions -maxdepth 1 -name '*.raw' -printf '  %f\n' 2>/dev/null | sort || true
     echo
     echo "== active sysexts =="
     systemd-sysext list --no-pager 2>/dev/null || true

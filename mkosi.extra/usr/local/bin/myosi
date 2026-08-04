@@ -28,7 +28,15 @@
 set -euo pipefail
 
 JUST_DIR="${MYOSI_JUST_DIR:-/usr/share/myosi/just}"
-RUN_JUSTFILE="${MYOSI_RUN_JUSTFILE:-/run/myosi/justfile}"
+# Root uses /run/myosi; everyone else a per-user runtime path so
+# read-only verbs work without root.
+if [ -n "${MYOSI_RUN_JUSTFILE:-}" ]; then
+    RUN_JUSTFILE="$MYOSI_RUN_JUSTFILE"
+elif [ "$EUID" -eq 0 ]; then
+    RUN_JUSTFILE=/run/myosi/justfile
+else
+    RUN_JUSTFILE="${XDG_RUNTIME_DIR:-/tmp}/myosi-$(id -u)/justfile"
+fi
 
 if [ ! -d "$JUST_DIR" ]; then
     echo "ERROR: $JUST_DIR not found" >&2

@@ -67,10 +67,11 @@ resolve_latest_release() {
     if [ -z "$version" ] || [ "$version" = "null" ]; then
         local auth_args=()
         mapfile -t auth_args < <(_gh_curl_auth_args)
+        # Single-pass awk consumes all input — a trailing head -1 can
+        # SIGPIPE curl under pipefail.
         version=$(curl -fsSL "${auth_args[@]}" \
                 "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
-            | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' \
-            | head -1)
+            | awk -F'"' '/"tag_name":/ && v=="" {v=$4} END{if(v!="")print v}')
     fi
     if [ -z "$version" ]; then
         echo "ERROR: failed to resolve latest release" >&2
@@ -155,7 +156,7 @@ resolve_boot_disk() {
     while [ -e "/sys/class/block/$cur" ]; do
         if [ -d "/sys/class/block/$cur/slaves" ] \
                 && [ -n "$(ls -A "/sys/class/block/$cur/slaves" 2>/dev/null)" ]; then
-            cur=$(ls "/sys/class/block/$cur/slaves" | head -1)
+            cur=$(cd "/sys/class/block/$cur/slaves" && set -- *; printf '%s' "$1")
             continue
         fi
         if [ -e "/sys/class/block/$cur/partition" ]; then

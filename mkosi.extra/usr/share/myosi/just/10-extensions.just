@@ -22,11 +22,15 @@ extension-enable name version="":
 
     REPO="${MYOSI_REPO:-aboglioli/myosi}"
 
+    # No pipeline into head -1 — it can SIGPIPE the producer under
+    # pipefail.
     current_image_version() {
+        local f v
         for f in /usr/lib/os-release /etc/os-release; do
             [ -f "$f" ] || continue
-            awk -F= '$1=="IMAGE_VERSION"{v=$2;gsub(/^"|"$/,"",v);print v;exit}' "$f"
-        done | head -1
+            v=$(awk -F= '$1=="IMAGE_VERSION"{gsub(/^"|"$/,"",$2);print $2;exit}' "$f")
+            if [ -n "$v" ]; then printf '%s\n' "$v"; return 0; fi
+        done
     }
 
     # Default to the BOOTED image's version, not the latest release:
@@ -64,8 +68,10 @@ extension-enable name version="":
     feature_enable "{{name}}" sysupdate.d
     refresh_sysext
 
-    if ! keyctl list %:.platform 2>/dev/null | grep -qE 'myosi DEV Image' \
-       && ! keyctl list %:.machine  2>/dev/null | grep -qE 'myosi DEV Image'; then
+    # grep without -q: its early exit can SIGPIPE keyctl under
+    # pipefail.
+    if ! keyctl list %:.platform 2>/dev/null | grep -E 'myosi DEV Image' >/dev/null \
+       && ! keyctl list %:.machine  2>/dev/null | grep -E 'myosi DEV Image' >/dev/null; then
         echo >&2
         echo "NOTE: image.crt isn't loaded into .platform/.machine yet" >&2
         echo "      sysext merged with integrity-only validation." >&2
@@ -110,11 +116,11 @@ extension-list:
     echo
     echo "== sysexts on disk =="
     echo "-- /usr/share/myosi/extensions/  (verity-baked baselines) --"
-    find /usr/share/myosi/extensions -maxdepth 1 -type f -name '*.raw' -printf '  %f\n' 2>/dev/null | sort
+    find /usr/share/myosi/extensions -maxdepth 1 -type f -name '*.raw' -printf '  %f\n' 2>/dev/null | sort || true
     echo "-- /var/lib/myosi/extensions/  (sysupdate store, versioned) --"
-    find "$STORE" -maxdepth 1 -type f -name '*.raw' -printf '  %f\n' 2>/dev/null | sort
+    find "$STORE" -maxdepth 1 -type f -name '*.raw' -printf '  %f\n' 2>/dev/null | sort || true
     echo "-- /var/lib/extensions/  (selected for merge) --"
-    find /var/lib/extensions -maxdepth 1 -name '*.raw' -printf '  %f\n' 2>/dev/null | sort
+    find /var/lib/extensions -maxdepth 1 -name '*.raw' -printf '  %f\n' 2>/dev/null | sort || true
     echo
     echo "== active sysexts (merged into /usr) =="
     systemd-sysext list --no-pager 2>/dev/null || true

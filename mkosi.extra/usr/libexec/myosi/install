@@ -28,7 +28,7 @@ SOURCE=""
 for arg in "$@"; do
     case "$arg" in
         --reset-identity|--reset) RESET_IDENTITY=1 ;;
-        -h|--help) sed -n 's/^# \?//p' "$0" | head -50; exit 0 ;;
+        -h|--help) sed -n '1,50s/^# \{0,1\}//p' "$0"; exit 0 ;;
         *)
             if [ -z "$TARGET" ]; then
                 TARGET="$arg"
@@ -75,11 +75,14 @@ FULL_IMAGE_RE='.*/myosi_[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+_[A-Za-z0-9-]+\.raw(\.xz|\
 pick_image_from() {
     local dir="$1"
     [ -d "$dir" ] || return 1
-    local match ext
+    local matches match ext
     for ext in .xz .zst ""; do
-        match=$(find "$dir" -maxdepth 1 -type f -regextype posix-extended \
+        # First line taken in bash — head -1 after sort can SIGPIPE
+        # under pipefail.
+        matches=$(find "$dir" -maxdepth 1 -type f -regextype posix-extended \
                     -regex "${FULL_IMAGE_RE}" -name "*.raw${ext}" 2>/dev/null \
-                | sort -r | head -1)
+                | sort -r)
+        match=${matches%%$'\n'*}
         if [ -n "$match" ]; then
             echo "$match"
             return 0
@@ -271,8 +274,10 @@ udevadm settle 2>/dev/null || true
 if [ "$RESET_IDENTITY" = "1" ]; then
     echo
     echo "Resetting identity: wiping data-luks header on $TARGET..."
+    # END-form awk consumes all input; {print; exit} can SIGPIPE the
+    # producer under pipefail.
     data_part_num=$(sgdisk -p "$TARGET" 2>/dev/null \
-        | awk '$NF=="data-luks"{print $1; exit}')
+        | awk '$NF=="data-luks"{n=$1} END{if(n!="")print n}')
     if [ -z "$data_part_num" ]; then
         echo "WARN: could not locate data-luks partition on $TARGET — skipping identity reset" >&2
     else
