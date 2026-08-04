@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Start units that sysext-shipped target drop-ins declare via Wants=.
+# pid1 resolves the boot transaction before the sysext merge and Wants=
+# (unlike Upholds=) is never re-evaluated, so late-merged drop-ins need
+# this explicit kick (systemd-sysext.service ExecStartPost: every boot
+# merge and every refresh). Correct-time rules: a target's units are
+# only started when that target is active or already queued, jobs are
+# queued with --no-block so each unit's own After=/Requires= ordering
+# applies, and already-active units no-op. Upholds= lines need no help.
+# Author contract: strictly-run-once units must self-gate with
+# RemainAfterExit=yes or a Condition* marker — a plain oneshot is
+# started again on every merge/refresh event (correct for
+# merge-reactive tasks like CDI regeneration).
+
+set -euo pipefail
+
+shopt -s nullglob
+for dir in /usr/lib/systemd/system/*.target.d; do
+    target=$(basename "${dir%.d}")
+    state=$(systemctl is-active "$target" 2>/dev/null || true)
+    job=$(systemctl show -P Job "$target" 2>/dev/null || true)
+    [ "$state" = active ] || [ -n "$job" ] || continue
+
+    units=$(grep -hs "^Wants=" "$dir"/*.conf | cut -d= -f2- | xargs -r echo)
+    [ -n "$units" ] || continue
+
+    echo "sysext-wants: starting for ${target}: ${units}"
+    # shellcheck disable=SC2086
+    systemctl start --no-block -- $units 2>/dev/null || true
+done
