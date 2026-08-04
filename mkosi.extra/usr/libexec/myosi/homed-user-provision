@@ -25,6 +25,17 @@ fi
 # defcontext=: homectl doesn't label the fs inside the LUKS image — without
 # it everything mounts unlabeled_t and SELinux denies sudo, sshd
 # authorized_keys, keyring (https://discussion.fedoraproject.org/t/72690).
+# Skip when the record's UID already belongs to another user — hosts
+# that provision their own primary user don't want the default one.
+RECORD_UID=$(jq -r '.uid // empty' "$IDENTITY" 2>/dev/null)
+if [ -n "$RECORD_UID" ] && ! homectl inspect "$NAME" >/dev/null 2>&1; then
+    EXISTING=$(getent passwd "$RECORD_UID" | cut -d: -f1)
+    if [ -n "$EXISTING" ] && [ "$EXISTING" != "$NAME" ]; then
+        echo "homed-user-provision: uid ${RECORD_UID} already owned by '${EXISTING}', skipping '$NAME'" >&2
+        exit 0
+    fi
+fi
+
 if ! homectl inspect "$NAME" >/dev/null 2>&1; then
     echo "homed-user-provision: creating homed record for '$NAME' from $IDENTITY" >&2
     PASSWORD="$BOOTSTRAP_PASSWORD" NEWPASSWORD="$BOOTSTRAP_PASSWORD" \
@@ -60,8 +71,13 @@ for group in "${!wanted[@]}"; do
         # run). Skip silently; next trigger retries.
         continue
     fi
-    if ! id -nG "$NAME" 2>/dev/null | tr ' ' '\n' | grep -qx "$group"; then
-        gpasswd -a "$NAME" "$group" >/dev/null
-        echo "homed-user-provision: added ${NAME} to ${group}" >&2
-    fi
+    # Pure-bash membership check; a grep -q pipeline can SIGPIPE its
+    # producer under pipefail.
+    case " $(id -nG "$NAME" 2>/dev/null) " in
+        *" $group "*) ;;
+        *)
+            gpasswd -a "$NAME" "$group" >/dev/null
+            echo "homed-user-provision: added ${NAME} to ${group}" >&2
+            ;;
+    esac
 done
