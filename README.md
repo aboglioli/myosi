@@ -576,7 +576,8 @@ groups, hashed password — NO secret/storage/diskSize, those are CLI
 flags). `myosi-homed-user@<name>.service` runs
 `/usr/libexec/myosi/homed-user-provision <name>` on first boot,
 which calls `homectl create --identity=<file> --storage=luks
---disk-size=3G --luks-extra-mount-options=defcontext=...` with the
+--disk-size=50G --luks-discard=yes --luks-offline-discard=no
+--luks-extra-mount-options=defcontext=...` with the
 bootstrap password fed via `PASSWORD` / `NEWPASSWORD` env vars.
 After creation, homed registers the record in its private database
 at `/var/lib/systemd/home/` and `homectl inspect` gates re-runs of
@@ -595,7 +596,7 @@ becomes viable and the env-var path can retire.
 `50-myosi.preset`. No script edits.
 
 **Storage backend:** `luks` (per-user LUKS2 image with btrfs inside,
-20 GiB default). Defence in depth on top of data-luks: data-luks
+50 GiB default). Defence in depth on top of data-luks: data-luks
 protects the disk at rest; per-home LUKS protects one user's data
 even against another user on the same booted system who gains root
 and dumps `/var`. Trade-off accepted: first-boot `homectl create`
@@ -607,6 +608,49 @@ blocks 5-10 min on slow CPUs / emulated TPM during LUKS format.
     └── user.home            ← LUKS image file (per-user encryption)
         └── (when activated → /home/user, inner btrfs)
 ```
+
+**Discard policy — `--luks-discard=yes --luks-offline-discard=no`:**
+These are two different mechanisms with confusingly similar names.
+
+*Online* discard is the `discard` mount option on the inner btrfs. It
+reclaims space continuously while the user is logged in, through the
+whole stack: inner btrfs → dm-crypt (`allow_discards`) → loop device →
+`FALLOC_FL_PUNCH_HOLE` on the `.home` file → outer btrfs frees the
+extents. A 50 GiB home holding 9 GiB really occupies ~9 GiB of
+data-luks. This is what keeps the sparse image honest — keep it on.
+
+*Offline* discard (systemd's default is **on**, we turn it **off**) is
+what homed does at logout: FITRIM, then minimize the entire stack —
+shrink btrfs to its floor, shrink LUKS, truncate the image file,
+rewrite the partition table — and grow it all back at the next login.
+Two problems:
+
+1. It reclaims almost nothing that online discard hasn't already
+   reclaimed. It only truncates the tail of an already-hole-punched
+   sparse file.
+2. **It corrupts the home's size when interrupted.** btrfs can only
+   shrink online, via a slow relocate loop (8 s on a quiet home, 45 s+
+   on a busy one). `systemd-homed` waits a hardcoded 30 s for the
+   worker during shutdown, then `SIGKILL`s it — this is homed-internal,
+   *not* tunable via `TimeoutStopSec=`. The kill lands mid-loop, so
+   btrfs ends up shrunk (~13 G) inside a still-50 G LUKS device. On the
+   next boot homed's grow path compares the *image file* size against
+   the record's `diskSize`, sees 50 G == 50 G, logs `Image size already
+   matching, skipping operation`, and never asks btrfs — so `df` reports
+   a ~13 G home, permanently, until someone runs `btrfs filesystem
+   resize max` by hand. Observed on 2 of 6 consecutive boots.
+
+Symptom to recognize: `btrfs filesystem usage $HOME` shows a large
+`Device slack:` value. Repair is online and non-destructive:
+
+```bash
+sudo btrfs filesystem resize max /home/<user>
+homectl update <user> --luks-offline-discard=no   # stop it recurring
+```
+
+Cost of turning it off: the image file's *apparent* size stays at the
+full `--disk-size` (see the sparse-copy warning in Troubleshooting).
+`fstrim.timer` (weekly, enabled by default) remains the backstop.
 
 **First-boot flow:**
 
@@ -792,7 +836,7 @@ Two paths kept out of /home so homed-managed homes stay lean:
   `~/.var/app/<app>/` (small).
 
 Why outside /home: game binaries are public — no need for per-user
-crypto on top of data-luks. Per-user LUKS homes default to 20 GiB which
+crypto on top of data-luks. Per-user LUKS homes default to 50 GiB which
 Steam would blow past instantly; resize is easy (`homectl update
 user --disk-size=200G`) but the out-of-home path is the cleaner
 model.

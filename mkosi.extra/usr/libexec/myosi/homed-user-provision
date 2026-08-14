@@ -25,6 +25,13 @@ fi
 # defcontext=: homectl doesn't label the fs inside the LUKS image — without
 # it everything mounts unlabeled_t and SELinux denies sudo, sshd
 # authorized_keys, keyring (https://discussion.fedoraproject.org/t/72690).
+# --luks-offline-discard=no: the default (yes) shrinks the whole stack on
+# logout and regrows it on login. homed SIGKILLs the worker 30 s into
+# shutdown, which leaves btrfs shrunk inside a still-full-size LUKS device;
+# the next boot's grow path only compares image size vs. diskSize, sees a
+# match, and never regrows btrfs — so the home stays small until someone runs
+# `btrfs filesystem resize max`. Online discard already reclaims space, so
+# the logout shrink gains nothing.
 # Skip when the record's UID already belongs to another user — hosts
 # that provision their own primary user don't want the default one.
 RECORD_UID=$(jq -r '.uid // empty' "$IDENTITY" 2>/dev/null)
@@ -45,6 +52,7 @@ if ! homectl inspect "$NAME" >/dev/null 2>&1; then
             --disk-size=53687091200 \
             --fs-type=btrfs \
             --luks-discard=yes \
+            --luks-offline-discard=no \
             --luks-extra-mount-options=defcontext=system_u:object_r:user_home_dir_t:s0 \
             --password-hint="Default password: ${BOOTSTRAP_PASSWORD} — change with 'homectl passwd ${NAME}'"
 fi
