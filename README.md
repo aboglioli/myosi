@@ -544,7 +544,7 @@ sudo just install /dev/nvme0n1   # writes the same image to the internal disk
 First boot of the installed system runs:
 
 - `systemd-repart` in the initrd creates and grows `data-luks` to fill the disk, formats it as LUKS2 + btrfs, creates `/var`, `/etc`, `/home`, and `/srv` subvolumes (`FactoryReset=yes` + `Encrypt=key-file`)
-- `myosi-data-attach.service` unlocks `/dev/mapper/data` (key-file first, then TPM2/passphrase fallback) + unlocks present `data-N` pool members + runs `btrfs device scan` + seeds the empty `/etc` subvol from `/sysroot/usr/share/factory/etc` + `setfattr etc_t` on the subvol root
+- `myosi-data-attach.service` unlocks `/dev/mapper/data` (key-file first, then TPM2/passphrase fallback) + unlocks present `data-N` pool members + runs `btrfs device scan`. It does **not** mount or seed anything — `sysroot-etc.mount` mounts the `/etc` subvol, and `myosi-etc-seed.service` seeds it from `/sysroot/usr/share/factory/etc` + stamps `etc_t` on the subvol root
 - `sysroot-etc.mount` mounts the `/etc` subvolume before pivot (`/var`, `/home`, `/srv` mount post-pivot — `var.mount` is gpt-auto-generated, `home.mount` and `srv.mount` ship explicitly)
 - `myosi-homed-user@user.service` calls `homed-user-provision`, which runs `homectl create` from `/usr/share/myosi/users/user.user` and materializes the LUKS-backed home (default password `changeme`, see Default credentials + auth)
 - `systemd-firstboot` (locale/timezone/etc pre-baked, no-op)
@@ -846,7 +846,7 @@ model.
 No manual resize step is needed. The initrd boot chain handles disk growth end-to-end:
 
 1. `systemd-repart.service` runs after `sysroot.mount`, reads `/usr/lib/repart.d/*.conf` from the initrd, creates the `data-luks` partition (or grows it to fill the disk on subsequent boots), formats it as LUKS2 + btrfs, and creates `/var`, `/etc`, `/home`, and `/srv` subvolumes.
-2. `myosi-data-attach.service` unlocks `/dev/mapper/data` and any present `data-N` pool members, runs `btrfs device scan`, and prepares the `/etc` subvol (seed + label). `sysroot-etc.mount` mounts `/etc` before pivot; `var.mount` is gpt-auto-generated post-pivot. btrfs sees the full grown mapper size immediately.
+2. `myosi-data-attach.service` unlocks `/dev/mapper/data` and any present `data-N` pool members, runs `btrfs device scan`, and prepares the `/etc` subvol (seed + label). `sysroot-etc.mount` mounts `/etc` before pivot (and that mount is inherited across `switch_root` — `/etc` is the one data subvol with no unit in the main system); the explicit `var.mount` / `home.mount` / `srv.mount` units mount the siblings post-pivot. btrfs sees the full grown mapper size immediately.
 3. Re-partition and growth on subsequent boots is automatic: repart grows the GPT partition before unlock, the mapper opens at the current partition size, and filesystem growth stays in the repart/grow path — not in `myosi-data-attach`.
 
 Sanity-check after the first boot if you like:
@@ -1143,14 +1143,14 @@ The primary `data-luks` partition is not selected globally by label. In the init
 2. Unlocks it as `/dev/mapper/data` — tries the embedded key-file first (`/usr/share/myosi/keys/data.key`), falls through to `systemd-cryptsetup attach ... tpm2-device=auto,discard` for TPM2/passphrase.
 3. Scans **every** disk for LUKS containers with `data-[0-9]+` labels and unlocks them as pool members (multi-disk hosts: secondary disks contribute their `data-N` containers regardless of which disk they sit on).
 4. Runs `btrfs device scan` so the kernel knows about every multi-device pool member.
-5. Mounts the btrfs top-level briefly to prepare the `/etc` subvol: verify it exists (fail loudly if not — upgrade hosts must create it manually per the upgrade runbook), seed it from `/sysroot/usr/share/factory/etc` if empty, `setfattr etc_t` on its root inode.
+The helper stops there — it mounts nothing. Preparing the `/etc` subvol is split into two later units in the same pre-pivot chain: `sysroot-etc.mount` mounts it, then `myosi-etc-seed.service` seeds it from `/sysroot/usr/share/factory/etc` if empty (`ConditionDirectoryNotEmpty=!/sysroot/etc`) and stamps `etc_t` on its root inode. Both carry `OnFailure=emergency.target`, so an upgrade host missing the `/etc` subvol drops to the initrd emergency shell rather than pivoting broken.
 
-`sysroot-etc.mount` then mounts `/dev/mapper/data` with `subvol=/etc` at `/sysroot/etc` before pivot. `/var` is NOT mounted in the initrd — `systemd-gpt-auto-generator` auto-emits `var.mount` post-pivot from the DPS `Type=var` partition + `DefaultSubvolume=/var`, same lifecycle as `home.mount` and `srv.mount`.
+`sysroot-etc.mount` then mounts `/dev/mapper/data` with `subvol=/etc` at `/sysroot/etc` before pivot; that mount is inherited across `switch_root`, which is why there is no `etc.mount` unit in the main system (`systemctl status etc.mount` shows it `Loaded: loaded (/proc/self/mountinfo)`). `/var` is NOT mounted in the initrd — the shipped `var.mount` unit mounts it post-pivot, same lifecycle as `home.mount` and `srv.mount`. These are explicit units, **not** gpt-auto output: `systemd-gpt-auto-generator` is unreliable on verity-protected installs (systemd 259), so myosi owns every post-pivot mount and pins `Options=` itself (a gpt-auto `var.mount` would use btrfs defaults and lose `compress=zstd:3` + `noatime`). On a running host `ls /run/systemd/generator/*.mount` is empty — confirmation that nothing is auto-generated.
 
 There is no sealed-root `/etc/crypttab`, no pre-declared slot list, and no runtime udev/template service for `data-N`. Any `data-N` device that gates `/var` must be present during initrd boot so `myosi-data-attach` can unlock it before the btrfs mount. Post-switch hotplug of unrelated encrypted disks belongs in operator-managed `/etc/crypttab` (persistent on the `/etc` subvol) or explicit units, because those disks do not gate the `/var` or `/etc` subvolumes that the boot path requires.
 
 **Critical systemd behaviour notes that drove this design:**
-- `systemd-gpt-auto-generator` does not mount non-root DPS `Type=var` partitions in the initrd; it handles `/var` after `switch_root`.
+- `systemd-gpt-auto-generator` does not mount non-root DPS `Type=var` partitions in the initrd; it would only handle `/var` after `switch_root`. myosi does not rely on it at all (it misbehaves on verity-protected installs) — every post-pivot mount is an explicit unit.
 - myosi needs `/sysroot/var` AND `/sysroot/etc` before `switch_root` because both live as sibling subvolumes on the same `data-luks` btrfs volume.
 - Global `PARTLABEL=data-luks` selection is unsafe when another myosi disk is attached. The initrd helper scopes primary `/var` selection to the same disk as the booted root.
 - Pool members (`data-N`) are intentionally NOT scoped to the boot disk — multi-disk hosts keep their secondary LUKS containers on dedicated disks, and the scanner must find them across all available block devices.
