@@ -23,4 +23,5 @@ TimeoutStartSec=15min
 
 [Install]
 WantedBy=multi-user.target
-DefaultInstance=user
+# No DefaultInstance=: it would let an instance-less `systemctl enable` create
+# the generic `user` the image no longer ships.

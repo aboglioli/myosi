@@ -339,16 +339,24 @@ decoupled — no base-image edits needed when adding a new sysext):
 3. `/usr/libexec/myosi/homed-user-provision` (phase 2) reads every
    `*.conf` in that drop-in directory, dedups the requested group
    names, and for each one currently present in NSS calls
-   `gpasswd -a user <group>`. The membership lands in
+   `gpasswd -a <user> <group>`. The membership lands in
    `/etc/group` (persistent btrfs subvol on data-luks) and
-   is picked up at next login.
+   is picked up at next login. When the instance name doesn't own the
+   record's UID, the guard retargets binding to the user that actually
+   does — so a host that created its own primary user still gets bound.
 
 4. The binder runs at two trigger points: at boot via
-   `myosi-homed-user@user.service` (templated unit, ordered
+   `myosi-homed-user@<you>.service` (templated unit, ordered
    After=systemd-homed.service so the varlink interface is up) AND
    from `refresh_sysext` in `lib.sh` (after every live
-   `systemd-sysext refresh`, via `systemctl start
-   myosi-homed-user@user.service`).
+   `systemd-sysext refresh`, which starts every **enabled** instance —
+   it must not hardcode one, or it would materialize a user on a host
+   that deliberately never enabled the unit).
+
+   **The instance is not enabled by default.** Run `systemctl enable
+   --now myosi-homed-user@<you>.service` once, post-install — see
+   [Post-installation](#post-installation). Until then, sysext group
+   drop-ins are installed but never bound to anyone.
 
 Adding a new feature that needs the default user in a new group is
 a one-step change: ship `/usr/share/myosi/user-groups.d/<name>.conf`
@@ -471,10 +479,14 @@ on this layout. Generic summary so you know what to look for:
   record from `/usr/share/myosi/users/<name>.user` and bind the user
   to active sysext groups. Decoupled from `systemd-homed.service`
   ExecStartPost (Type=notify on homed used to mask provisioning
-  failures because READY=1 fires before ExecStartPost runs). Preset
-  enables `myosi-homed-user@user.service`; add a user by
-  dropping `/usr/share/myosi/users/<name>.user` and
-  `enable myosi-homed-user@<name>.service` to the preset.
+  failures because READY=1 fires before ExecStartPost runs). **No
+  instance is enabled by default** — the image ships no interactive user
+  (see [Post-installation](#post-installation)). The operator enables
+  `myosi-homed-user@<you>.service` post-install for group binding, or a
+  rebuilt image pre-bakes one by shipping
+  `/usr/share/myosi/users/<name>.user` plus a
+  `multi-user.target.wants/myosi-homed-user@<name>.service` symlink via
+  `mkosi.local.conf` `ExtraTrees=`.
 - `nvidia-cdi-refresh.service` ships `10-myosi-no-rate-limit.conf`
   (`StartLimitIntervalSec=10s` + `StartLimitBurst=20`) — its path watcher
   fires twice per `sysext-modules-refresh` run, so the default 5-in-10s
@@ -545,27 +557,165 @@ First boot of the installed system runs:
 
 - `systemd-repart` in the initrd creates and grows `data-luks` to fill the disk, formats it as LUKS2 + btrfs, creates `/var`, `/etc`, `/home`, and `/srv` subvolumes (`FactoryReset=yes` + `Encrypt=key-file`)
 - `myosi-data-attach.service` unlocks `/dev/mapper/data` (key-file first, then TPM2/passphrase fallback) + unlocks present `data-N` pool members + runs `btrfs device scan`. It does **not** mount or seed anything — `sysroot-etc.mount` mounts the `/etc` subvol, and `myosi-etc-seed.service` seeds it from `/sysroot/usr/share/factory/etc` + stamps `etc_t` on the subvol root
-- `sysroot-etc.mount` mounts the `/etc` subvolume before pivot (`/var`, `/home`, `/srv` mount post-pivot — `var.mount` is gpt-auto-generated, `home.mount` and `srv.mount` ship explicitly)
-- `myosi-homed-user@user.service` calls `homed-user-provision`, which runs `homectl create` from `/usr/share/myosi/users/user.user` and materializes the LUKS-backed home (default password `changeme`, see Default credentials + auth)
+- `sysroot-etc.mount` mounts the `/etc` subvolume before pivot (`/var`, `/home`, `/srv` mount post-pivot via the explicit `var.mount`, `home.mount`, `srv.mount` units — not gpt-auto)
 - `systemd-firstboot` (locale/timezone/etc pre-baked, no-op)
+
+**No interactive user is created.** The image ships none on purpose — see
+[Post-installation](#post-installation) for why and what to do next.
 
 ### Step 3 — Post-install runbook
 
 Run these steps after the first successful boot. The base image is identical on every host; this section turns it into a usable machine by setting local credentials, growing mutable storage, enrolling trust anchors, and enabling host-specific extensions.
 
-#### 3a. Change passwords and set hostname
+<a id="post-installation"></a>
+#### 3a. Post-installation — create your user, then lock root
 
-`user` ships with `changeme`. `root` ships locked. `user` is
-managed by `systemd-homed` (see Default credentials + auth) — `homectl passwd` is the
-homed-aware way to change the password.
+**The image ships no interactive user.** `myosi-homed-user@.service` is
+present but **disabled**, and `/usr/share/myosi/users/user.user` is only an
+example. The single credential in the image is the console bootstrap:
+**`root` / `changeme`**.
+
+**Why no default user:** a public image would have to pick a generic name
+(`user`), and **systemd 259 cannot rename a homed user** — there is no
+`homectl rename`. The name is embedded in the signed user record, the
+record filename, `homeDirectory`, the `/home/<name>.home` image, the inner
+btrfs subvolume and label, the LUKS header's embedded identity, and the
+blob dir. "Renaming" is really create-new → copy → delete-old, which needs
+2× the space and re-encrypts everything. Cheap on day one, painful at 50 GB.
+So you pick the real name once, here.
+
+**Why a known root password is acceptable:** it is **console-only**. sshd is
+`AuthenticationMethods publickey` with `PasswordAuthentication no` and
+`PermitRootLogin prohibit-password`, so it grants nothing remotely — an
+attacker needs physical access. It is also meant to be destroyed in step 4.
+For fleets, bake your own hash over `etc/shadow` via `mkosi.local.conf`
+`ExtraTrees=`.
+
+**Write a user record, then enable its unit.** That is the whole flow — the
+record is a plain file on the writable `/etc` subvolume, so this needs no
+rebuild and no credentials:
 
 ```bash
-sudo passwd root             # sudo asks for user's current password: changeme
-homectl passwd user     # change user's password (re-keys LUKS slot on TPM2 hosts)
-sudo hostnamectl hostname <hostname>
+# 1. Log in at the CONSOLE as root / changeme.
+
+# 2. Describe YOUR user. Pick the real name now — it cannot be changed
+#    later. uid 1000 makes it the primary user. Full field list and a
+#    commented example live in /etc/myosi/users/README.
+cat >/etc/myosi/users/<you>.user <<'EOF'
+{
+    "userName": "<you>",
+    "uid": 1000,
+    "gid": 1000,
+    "realName": "<Your Name>",
+    "homeDirectory": "/home/<you>",
+    "shell": "/usr/bin/fish",
+    "memberOf": ["wheel", "video", "render", "input", "kvm"],
+    "preferredLanguage": "en_US.UTF-8",
+    "service": "io.systemd.Home",
+    "enforcePasswordPolicy": false
+}
+EOF
+
+# 3. Enable the instance. This CREATES the user (LUKS home, correct storage
+#    flags, SELinux defcontext) and binds it to any sysext-declared groups.
+#    Idempotent — re-running it later only re-checks group membership.
+systemctl enable --now myosi-homed-user@<you>.service
+homectl passwd <you>                  # rotate off the `changeme` bootstrap
+
+# 4. Verify you can log in as <you> on another TTY (Ctrl-Alt-F2) BEFORE
+#    this next step — locking root with no working user leaves you with
+#    only the USB installer as a way back in.
+passwd -l root
+
+# 5. Name the host.
+hostnamectl hostname <hostname>
 ```
 
-The image never ships a usable root password.
+Leaving the instance enabled is what keeps your groups in sync: every
+`myosi extension-enable` re-runs it, so a sysext that introduces a new group
+binds it on the spot.
+
+Step 3 also allocates the `/etc/subuid` + `/etc/subgid` ranges rootless
+podman, distrobox and incus need. Nothing else maintains those files — a
+homed record has no field that feeds them, and `usermod --add-subuids`
+refuses homed users because they are not in `/etc/passwd`. The helper takes
+the first free `1000000`-wide gap at or above `100000`, so it is safe on a
+pre-existing file with custom entries; an existing entry for your name is
+left alone, and if nothing fits it says so rather than writing a bad range.
+Verify with:
+
+```bash
+grep "^<you>:" /etc/subuid /etc/subgid
+podman unshare cat /proc/self/uid_map     # as <you>, after logging in
+```
+
+**Alternative — create it by hand.** If you would rather not keep a record
+file, `homectl create` does the same thing; these are the flags the helper
+would have applied (`defcontext=` is REQUIRED, or SELinux denies
+sudo/sshd/keyring — see 3a.1 for each one's rationale):
+
+```bash
+homectl create <you> \
+    --uid=1000 --real-name="<Your Name>" --member-of=wheel \
+    --shell=/usr/bin/fish --storage=luks --disk-size=50G --fs-type=btrfs \
+    --luks-discard=yes --luks-offline-discard=no \
+    --luks-extra-mount-options=defcontext=system_u:object_r:user_home_dir_t:s0
+```
+
+Enable the unit afterwards anyway — with no record file it skips creation
+and does group binding only, which is exactly what you want at that point.
+
+**Group memberships from sysexts** (`libvirt`, `incus-admin`, …) come from
+`/usr/share/myosi/user-groups.d/*.conf`, which the same unit reads in its
+second phase. That is why step 3 leaves the instance enabled rather than
+just running it once.
+
+Enabling works even though `/usr` is a read-only erofs image: `systemctl enable`
+writes a symlink into `/etc/systemd/system/…​.wants/` pointing *at* the unit
+in `/usr`. `/etc` is a writable btrfs subvolume on data-luks, so the
+enablement also **survives A/B image updates** — the root slot rolls over,
+`/etc` does not. (Enabling a **sysext-provided** unit this way is not safe:
+the symlink dangles whenever that sysext is disabled. Those use `Upholds=`
+drop-ins instead — see "Enabling units without presets".)
+
+**Creation is driven entirely by the record file.** The helper searches two
+places, in order:
+
+1. `/etc/myosi/users/<name>.user` — writable, operator-authorable
+   post-install, survives A/B image updates. This is the one you use
+2. `/usr/share/myosi/users/<name>.user` — baked, read-only erofs, so
+   operators cannot add records here. Only `user.user` ships, as an example
+
+With a record for `<name>`, enabling the instance creates the user and binds
+groups. With no record it binds groups only — so `systemctl enable --now
+myosi-homed-user@<you>.service` on a name you never wrote a file for will
+not conjure a user. (`@user` is the one exception: `user.user` is baked, so
+enabling that instance does create the generic user.)
+
+Editing the record later does **not** update an existing user — creation is
+one-shot, gated on `homectl inspect`. Use `homectl update` for that.
+
+To pre-bake a user on a rebuilt image instead, ship
+`usr/share/myosi/users/<you>.user` plus a
+`multi-user.target.wants/myosi-homed-user@<you>.service` symlink through a
+private `mkosi.local.conf` `ExtraTrees=` overlay. Do **not** additionally
+enable `@user`: both instances claim UID 1000 and start in parallel, so
+which one wins is a race. If UID 1000 is already taken by someone else the
+helper never creates — it retargets group binding to the actual owner.
+
+**What else is operator-enabled?** Almost nothing — the image is opinionated
+and presets cover the rest:
+
+| Unit | State | Enable when |
+|---|---|---|
+| `myosi-homed-user@<you>.service` | disabled | You want sysext group bindings kept in sync (above) |
+| `systemd-homed-firstboot.service` | disabled | You'd rather be prompted for a user on first boot, or drive it with a `home.create.<name>` credential. Blocks unattended installs if it prompts |
+| `bootc-fetch-apply-updates.timer` | disabled **on purpose** | Never — it conflicts with sysupdate-driven UKI rollover |
+
+Sysexts are **not** managed with `systemctl` — use `myosi extension-enable
+<name>` (see 3e). Updates are deliberately manual (`myosi update`); there is
+no auto-update timer. Only `fstrim.timer` and
+`systemd-tmpfiles-clean.timer` run periodically.
 
 #### 3a.1. User management with systemd-homed
 
@@ -659,15 +809,16 @@ full `--disk-size` (see the sparse-copy warning in Troubleshooting).
    belt-and-suspenders; the /etc subvol is a plain filesystem so the
    parallel `sshd-keygen@*` race no longer applies, but the
    sequential generator costs nothing and keeps logs readable).
-2. `systemd-homed.service` starts. `myosi-homed-user@user.service`
-   runs `homed-user-provision user`, which calls `homectl
-   create --identity=/usr/share/myosi/users/user.user
-   --storage=luks ...` with the `changeme` bootstrap password via
-   `PASSWORD`/`NEWPASSWORD` env vars.
-3. Operator logs in as user (console with `changeme`, or SSH publickey
-   if a key was provisioned via one of the four sshd sources) and runs
-   `homectl passwd user` to rotate the bootstrap password.
-4. (Optional) Operator runs `sudo loginctl enable-linger user`
+2. `systemd-homed.service` starts. **No user is provisioned** —
+   `myosi-homed-user@.service` ships disabled, so nothing calls
+   `homectl create`. (On images that pre-bake an identity via a private
+   overlay, the enabled `@<name>` instance runs `homed-user-provision
+   <name>` here, seeding the LUKS keyslot from the `MYOSI_BOOTSTRAP_PASSWORD`
+   env default via `PASSWORD`/`NEWPASSWORD`.)
+3. Operator logs in at the console as `root` / `changeme`, runs
+   `homectl create <you> --uid=1000 ...` to create the real user, then
+   `passwd -l root`. See [Post-installation](#post-installation).
+4. (Optional) Operator runs `sudo loginctl enable-linger <you>`
    if they want rootless quadlets to keep running across reboots.
    Linger is NOT enabled by default — at every boot it tries to
    activate the homed home, which fails unattended (LUKS needs the
@@ -677,13 +828,14 @@ full `--disk-size` (see the sparse-copy warning in Troubleshooting).
 
 | Path | State on fresh install | Notes |
 |------|------------------------|-------|
-| `/etc/shadow` `root` | locked (`!locked`) — no password | Console login as root refused until operator sets one |
-| `/etc/ssh/sshd_config.d/50-myosi.conf` | `PermitRootLogin prohibit-password` | Root SSH allowed via publickey only — no password method |
-| baked authorized_keys | typically provisioned for `user`, not `root` | Root SSH won't work in prod until a root key is shipped (overlay, `/etc` drop-in, or credential) |
-| `user` | created by homed, `changeme` password | Default login path on every host |
+| `/etc/shadow` `root` | bootstrap password `changeme` | **Console only** — sshd offers no password method. Destroy it with `passwd -l root` once your user works |
+| `/etc/ssh/sshd_config.d/50-myosi.conf` | `PermitRootLogin prohibit-password`, `PasswordAuthentication no`, `AuthenticationMethods publickey` | Root SSH via publickey only. The bootstrap password is **not** remotely usable |
+| baked authorized_keys | none in the public image | Root SSH won't work until a key is shipped (overlay, `/etc` drop-in, or credential) |
+| interactive user | **none** | You create it on first boot — see [Post-installation](#post-installation) |
 
-So out of the box, only **user** can log in (console with `changeme`,
-OR SSH publickey if a key was provisioned). `sudo` works from there.
+So out of the box, only **root at the console** can log in. Everything else
+starts from there. Override the bootstrap hash for real fleets by baking
+your own over `etc/shadow` via `mkosi.local.conf` `ExtraTrees=`.
 
 **Upgrading user's home to LUKS + TPM2 (single-host, console-driven):**
 
@@ -1725,19 +1877,19 @@ Only `/var`, `/home`, and persistent `/etc` are unique host state. The signed ro
 
 | Account | Default password | Notes |
 |---------|------------------|-------|
-| `user` (UID 1000, fish, in wheel/kvm/video/render/input/libvirt/incus-admin) | `changeme` | Change immediately on first login |
-| `root` | **LOCKED** (`!locked` in `/etc/shadow`) | No password. Bootstrap via `sudo passwd root` from user after first SSH/console login. |
+| `root` | `changeme` (sha-512 hash in `/etc/shadow`) | **Console only** — sshd has no password method. Destroy with `passwd -l root` after creating your user |
+| interactive user | **none shipped** | `myosi-homed-user@.service` is disabled; you create your own with `homectl create` on first boot |
 
-Hashes are baked into `mkosi.extra/etc/shadow` (sha-512 + deterministic salt for reproducible builds). `systemd-sysusers` preserves shipped shadow entries on first boot, so the hash survives user creation.
+Hashes are baked into `mkosi.extra/etc/shadow` (sha-512 + fixed salt for reproducible builds). `systemd-sysusers` preserves shipped shadow entries on first boot, so the hash survives user creation.
 
 `sysusers.d` has **no password column** in its format (6 fields: `TYPE NAME ID GECOS HOME SHELL`), so the only declarative path for shipping a default password is `/etc/shadow` itself. A 7th column triggers `Trailing garbage.` from `systemd-sysusers` and the entry is dropped — verified the hard way during the password-bootstrap refactor.
 
 **Bootstrap flow on a fresh install:**
-1. Log in as `user` — console with `changeme`, or SSH publickey if a key was provisioned (private overlay, `/etc` drop-in, or credential).
-2. `sudo passwd root` — sudo asks for user's password (`changeme`), then sets a real root password.
-3. `passwd` — set a real user password.
+1. Log in at the **console** as `root` / `changeme`. (Not over SSH — sshd is publickey-only.)
+2. `homectl create <you> --uid=1000 ...` — create the real, properly-named user. See [Post-installation](#post-installation) for the full command and why the name can't be changed later.
+3. Verify `<you>` can log in on another TTY, then `passwd -l root` to destroy the bootstrap credential.
 
-`root` only ever has a password the operator sets manually post-install; the image never ships a known root credential.
+The image ships exactly one known credential, it is unusable remotely, and step 3 removes it. Override the baked hash for real fleets via `mkosi.local.conf` `ExtraTrees=`.
 
 **SSH:**
 - Key-only (`PasswordAuthentication no`)
@@ -1747,7 +1899,7 @@ Hashes are baked into `mkosi.extra/etc/shadow` (sha-512 + deterministic salt for
 
 **sudo:** `%wheel ALL=(ALL) ALL`. `user` is in `wheel`. Prompts for password each `timestamp_timeout=15` minutes.
 
-**Rootless podman:** `user` gets `subuid` + `subgid` range `100000:65536`; `root` gets `1000000:65536`.
+**Rootless podman:** `/etc/subuid` + `/etc/subgid` bake only the static image-owned identities — `root` at `1500000:200000`, `containers` at `2000000:1000000`. The interactive user is **not** baked (the image ships none, and the name is per-host); `myosi-homed-user@<name>` allocates it the first free `1000000`-wide gap at or above `100000` on provisioning.
 
 ---
 
@@ -1949,8 +2101,14 @@ sudo systemd-sysext list
 ### Sysexts fail to merge with a verity signature error
 - The kernel has no trusted `image.der`. Enroll `/efi/keys/image.der` into firmware db, or MOK-enroll `/usr/share/myosi/keys/image.der` with `mokutil --import`. Reboot, then verify with `sudo keyctl list %:.platform` and `sudo keyctl list %:.machine`. Unsigned sysexts are possible by changing `mkosi.shared/sysext.conf` from `Verity=signed` to `Verity=yes`, but then you keep Merkle-tree integrity without the PKCS#7 authenticity check.
 
-### Login as `user` rejects `changeme`
+### Login as `root` rejects `changeme` (nspawn)
 - nspawn was launched with `--read-only` instead of `--volatile=overlay`. Without overlay, `/etc/shadow` is RO and systemd-sysusers can't write the hash. Re-launch with `--volatile=overlay`.
+
+### There is no user to log in as after install
+- Expected — the image ships none. Log in at the **console** as `root` / `changeme` and create yours with `homectl create`; see [Post-installation](#post-installation). SSH won't work for this: sshd is publickey-only, so the bootstrap password is console-only by design.
+
+### `myosi extension-enable` doesn't add me to `libvirt` / `incus-admin`
+- Group binding runs from `myosi-homed-user@<you>.service`, which is not enabled by default. `systemctl enable --now myosi-homed-user@<you>.service`, then log out and back in (group changes apply at next login). Verify the drop-ins exist under `/usr/share/myosi/user-groups.d/` and check `journalctl -u myosi-homed-user@<you>.service`.
 
 ### `systemd-nspawn --image=` fails with "Failed to load Verity signature partition: No data available"
 - Host kernel `.platform` keyring doesn't trust our `image.crt`. Expected on test hosts. Use the loop-mount + `--directory` + `--volatile=overlay` path documented above.
@@ -2047,7 +2205,7 @@ Intentional. `myosi` is an atomic, signed OS — installing arbitrary user-space
 | **v1.5: OpenZFS sysext via upstream tarball** | ✅ done — `zfs-build.sh` pulls `zfs-${ZFS_VERSION}.tar.gz`, generates SRPMs with `make srpm-utils srpm-kmod`, rebuilds via `kmod_exec rpmbuild`, signs `zfs.ko` + `spl.ko`. No dependency on zfsonlinux.org/fedora packaging that lags new Fedora releases. |
 | **v1.6: fleet-keys sysext baked into base** | ✅ done (since retired — the public repo ships no keys; see SSH hardening section) — `/usr/lib/extensions/fleet-keys_VER_ARCH.raw` ships in the verity-protected root for first-boot SSH; sysupdate rotations land in `/var/lib/extensions/` and win precedence. Originally shipped as a confext; reworked as a sysext that drops `authorized_keys` under `/usr/share/myosi/ssh/authorized_keys.d/` and is read by sshd via an `AuthorizedKeysFile` token. |
 | **v1.7: prerelease versioning + bare tags** | ✅ done — `YYYY.MM.DD.NN` for stable, `-rc.N` / `-beta.N` / `-alpha.N` for prereleases. No `v` prefix anywhere — filenames + tags identical. CI workflow `prerelease` input validates `(alpha|beta|rc)\.N`. |
-| **v1.8: locked root + bootstrap via user sudo** | ✅ done — root ships `!locked` in shadow; user has `changeme`. First-login `sudo passwd root` sets a real root password. Image never ships a known root credential. |
+| **v1.8: locked root + bootstrap via user sudo** | ⬅️ superseded — this shipped `root:!locked` plus a default `user`/`changeme`. Reversed once the repo went public: a generic `user` is unrenameable (no `homectl rename`), so the image now ships **no** interactive user and a **console-only** root bootstrap instead. See [Post-installation](#post-installation). |
 | **v1.9: incremental build mode** | ✅ done — `just build` runs `mkosi -fi` for fast local iteration; `just build full` runs `mkosi -ff` for clean releases; CI workflow pinned to full. |
 | **v2: real-hardware install** | ⬜ pending — dd → USB → install → boot a sacrificial target |
 | **v3: sysupdate end-to-end** | ✅ done — `systemd-sysupdate` fetches straight from the public GitHub release (`url-file` + `SHA256SUMS`); base + enabled sysexts update as one atomic generation, machines as a separate component. |
@@ -2173,7 +2331,7 @@ sudo systemd-nspawn \
 `--volatile=overlay` is critical — root mounts read-only from erofs; this adds a tmpfs overlay so `systemd-sysusers` can write `/etc/shadow` and `/etc/machine-id`.
 
 Inside the container:
-- Login: `user` / `changeme` (root is shipped LOCKED — see "Default credentials" below).
+- Login: `root` / `changeme` (the only shipped credential; no interactive user is created — see "Default credentials" below).
 
 ```bash
 # Verification

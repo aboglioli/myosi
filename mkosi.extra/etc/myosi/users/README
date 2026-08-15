@@ -1,0 +1,46 @@
+Declarative homed user records.
+
+Drop <name>.user here, then enable the matching unit:
+
+    systemctl enable --now myosi-homed-user@<name>.service
+
+That creates the user (LUKS home, SELinux defcontext, correct storage flags),
+binds it to groups declared by active sysexts, and allocates its
+/etc/subuid + /etc/subgid ranges.
+
+homed-user-provision searches this directory first, then the baked
+/usr/share/myosi/users/. This one is writable and survives A/B image updates;
+/usr is read-only erofs, so records cannot be added there.
+
+The file is the "regular" section of a systemd user record. Storage flags
+(--storage, --disk-size, --luks-*) are applied by the helper, not fields here.
+See homectl(1) and https://systemd.io/USER_RECORD/.
+
+Example — /etc/myosi/users/alan.user:
+
+    {
+        "userName": "alan",
+        "uid": 1000,
+        "gid": 1000,
+        "realName": "Alan Example",
+        "homeDirectory": "/home/alan",
+        "shell": "/usr/bin/fish",
+        "memberOf": ["wheel", "video", "render", "input", "kvm"],
+        "preferredLanguage": "en_US.UTF-8",
+        "service": "io.systemd.Home",
+        "enforcePasswordPolicy": false
+    }
+
+The home is created with the bootstrap password `changeme`; rotate it with
+`homectl passwd <name>`.
+
+Notes:
+  - uid 1000 marks the primary user. If that uid is already taken, the helper
+    skips creation and binds groups to the existing owner instead.
+  - Creation is one-shot, gated on `homectl inspect`. Editing this file later
+    does not update an existing record — use `homectl update`.
+  - A record is optional: `homectl create` by hand works too, and enabling the
+    unit afterwards still binds groups and subids.
+  - Pick the username carefully. systemd 259 has no `homectl rename`.
+
+Only files matching <name>.user are read; this README is ignored.

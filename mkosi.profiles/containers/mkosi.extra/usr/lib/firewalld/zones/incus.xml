@@ -1,39 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Custom firewalld zone for Incus-managed bridges. Permissive
-  (target=ACCEPT) — firewalld passes all traffic on incusbr0 without
-  filtering, while Incus's own nftables rules in the `incus` table
-  continue to enforce policy (DHCP ports, mDNS, NAT, forward).
+  Permissive zone for Incus bridges. Without it firewalld puts incusbr0's
+  veth pairs in the default `public` zone, which eats DHCPv4 OFFER replies
+  between dnsmasq and the container: IPv6 only, no NAT'd internet. Incus's
+  own nftables table still enforces policy.
 
-  Why a CUSTOM zone instead of adding to the built-in `trusted`:
-    firewalld zone XML is one file per zone, no drop-in merging. If
-    multiple packages each tried to ship their own
-    /etc/firewalld/zones/trusted.xml, the last one to land would
-    overwrite the others (last-write-wins). Pattern across Fedora is:
-    each project ships its OWN zone (libvirt → libvirt.xml,
-    Tailscale → tailscale.xml, etc.). Same convention here.
+  A custom zone rather than editing `trusted`: zone XML is one file per zone
+  with no drop-in merging, so two packages shipping trusted.xml would clobber
+  each other. Shipping our own matches libvirt and Tailscale.
 
-  Why this is needed:
-    Without a permissive zone for incusbr0, firewalld auto-assigns
-    the bridge's veth pairs to the `public` zone (firewalld's
-    default), which intercepts DHCPv4 OFFER replies between dnsmasq
-    and the container — leaving containers with IPv6 only and no
-    IPv4 / no NAT'd internet.
+  Operator override: /etc/firewalld/zones/incus.xml wins over this one.
 
-  Pattern matches myos/profiles/server.sh which baked
-      firewall-offline-cmd --zone=trusted --add-interface=incusbr0
-    via the Containerfile build. We pick a custom zone here for
-    cleaner co-existence with other packages that may also need
-    permissive policies on their own interfaces.
-
-  Lives in containers profile only — non-containers myosi hosts
-  never receive it. Shipped under /usr/lib/firewalld/zones/ to match
-  libvirt's convention: the file becomes part of the verity-protected
-  immutable image, operator never sees it as a writable factory
-  template in /etc. firewalld reads it automatically.
-
-  Operator override: create /etc/firewalld/zones/incus.xml — the
-  /etc copy takes precedence over /usr/lib factory zones.
+  NOTE: never write a double hyphen in this comment, not even inside a
+  quoted command. XML forbids it, and firewalld reacts by failing its whole
+  stock config load and exiting 0: no firewall at all, and the failed-unit
+  list stays clean, so nothing surfaces it.
 -->
 <zone target="ACCEPT">
   <short>Incus</short>

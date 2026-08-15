@@ -9,12 +9,14 @@
 enable myosi-sysext-relabel.service
 enable myosi-glib-schemas-compile.service
 
-# Homed user provisioning: materializes /usr/share/myosi/users/<instance>.user
-# on first boot. NOTE: preset-all does NOT honor template-instance enables
-# during postinst (no concrete instance on disk to enumerate) — the default
-# user is enabled via a static .wants/ symlink instead. Line kept for the
-# operator-side `systemctl preset` path, which does honor instances.
-enable myosi-homed-user@user.service
+# No myosi-homed-user@ instance is enabled: homed cannot rename a user later
+# (no `homectl rename` in 259), so a public image must not pick the name. The
+# operator creates one on first boot — see README "Post-installation".
+#
+# To pre-bake one, ship usr/share/myosi/users/<name>.user plus a
+# multi-user.target.wants/myosi-homed-user@<name>.service symlink via
+# mkosi.local.conf ExtraTrees= (preset-all can't enable template instances).
+# Don't also enable @user — both would claim UID 1000 and start in parallel.
 
 # No dotfiles seeding into $HOME: homed activates the encrypted home at PAM
 # login, so a build-time copy would be shadowed by the LUKS mount.

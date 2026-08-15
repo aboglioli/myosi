@@ -218,10 +218,15 @@ refresh_sysext() {
     # are stripped at build time to avoid overlay precedence bugs).
     systemctl restart myosi-glib-schemas-compile.service 2>/dev/null || true
 
-    # Re-run group bind so sysext-introduced groups (libvirt, incus-admin)
-    # attach to the user; takes effect at next login. Create phase is
-    # homectl-inspect-gated, so re-running is a no-op for existing users.
-    systemctl start myosi-homed-user@user.service 2>/dev/null || true
+    # Only ENABLED instances: `systemctl start` ignores enablement, so
+    # hardcoding @user would create the generic user on hosts that never
+    # enabled it. Applies at next login.
+    for _link in /etc/systemd/system/multi-user.target.wants/myosi-homed-user@*.service \
+                 /usr/lib/systemd/system/multi-user.target.wants/myosi-homed-user@*.service; do
+        [ -e "$_link" ] || continue
+        systemctl start "${_link##*/}" 2>/dev/null || true
+    done
+    unset _link
 
     # DBus + polkit don't rescan /usr/share on sysext merge — freshly merged
     # DBus-activated services report "The name is not activatable" (seen with
