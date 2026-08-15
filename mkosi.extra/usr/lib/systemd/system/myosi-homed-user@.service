@@ -23,7 +23,5 @@ TimeoutStartSec=15min
 
 [Install]
 WantedBy=multi-user.target
-# No DefaultInstance=: it used to be `user`, which made an instance-less
-# `systemctl enable myosi-homed-user.service` silently enable @user and
-# create the generic account the image no longer ships. Without it systemd
-# rejects that command outright, which is the honest failure.
+# No DefaultInstance=: it would let an instance-less `systemctl enable` create
+# the generic `user` the image no longer ships.
