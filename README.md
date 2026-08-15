@@ -587,53 +587,76 @@ So you pick the real name once, here.
 **Why a known root password is acceptable:** it is **console-only**. sshd is
 `AuthenticationMethods publickey` with `PasswordAuthentication no` and
 `PermitRootLogin prohibit-password`, so it grants nothing remotely — an
-attacker needs physical access. It is also meant to be destroyed in step 3.
-For fleets, override it: bake your own hash over `etc/shadow` via
-`mkosi.local.conf` `ExtraTrees=`, or pass a per-install
-`firstboot.root-password-hashed` credential on the ESP.
+attacker needs physical access. It is also meant to be destroyed in step 4.
+For fleets, bake your own hash over `etc/shadow` via `mkosi.local.conf`
+`ExtraTrees=`.
+
+**Write a user record, then enable its unit.** That is the whole flow — the
+record is a plain file on the writable `/etc` subvolume, so this needs no
+rebuild and no credentials:
 
 ```bash
 # 1. Log in at the CONSOLE as root / changeme.
 
-# 2. Create YOUR user. Pick the real name now — it cannot be changed later.
-#    --uid=1000 makes it the primary user. The flags mirror what
-#    homed-user-provision would have used; see 3a.1 for each one's rationale
-#    (defcontext= is REQUIRED or SELinux denies sudo/sshd/keyring).
-homectl create <you> \
-    --uid=1000 \
-    --real-name="<Your Name>" \
-    --member-of=wheel \
-    --shell=/usr/bin/fish \
-    --storage=luks \
-    --disk-size=50G \
-    --fs-type=btrfs \
-    --luks-discard=yes \
-    --luks-offline-discard=no \
-    --luks-extra-mount-options=defcontext=system_u:object_r:user_home_dir_t:s0
+# 2. Describe YOUR user. Pick the real name now — it cannot be changed
+#    later. uid 1000 makes it the primary user. Full field list and a
+#    commented example live in /etc/myosi/users/README.
+cat >/etc/myosi/users/<you>.user <<'EOF'
+{
+    "userName": "<you>",
+    "uid": 1000,
+    "gid": 1000,
+    "realName": "<Your Name>",
+    "homeDirectory": "/home/<you>",
+    "shell": "/usr/bin/fish",
+    "memberOf": ["wheel", "video", "render", "input", "kvm"],
+    "preferredLanguage": "en_US.UTF-8",
+    "service": "io.systemd.Home",
+    "enforcePasswordPolicy": false
+}
+EOF
 
-# 3. Verify you can log in as <you> on another TTY (Ctrl-Alt-F2) BEFORE
+# 3. Enable the instance. This CREATES the user (LUKS home, correct storage
+#    flags, SELinux defcontext) and binds it to any sysext-declared groups.
+#    Idempotent — re-running it later only re-checks group membership.
+systemctl enable --now myosi-homed-user@<you>.service
+homectl passwd <you>                  # rotate off the `changeme` bootstrap
+
+# 4. Verify you can log in as <you> on another TTY (Ctrl-Alt-F2) BEFORE
 #    this next step — locking root with no working user leaves you with
 #    only the USB installer as a way back in.
 passwd -l root
 
-# 4. Name the host.
+# 5. Name the host.
 hostnamectl hostname <hostname>
 ```
 
-`homectl passwd <you>` is the homed-aware way to change the password later
-(it re-keys the LUKS slot).
+Leaving the instance enabled is what keeps your groups in sync: every
+`myosi extension-enable` re-runs it, so a sysext that introduces a new group
+binds it on the spot.
 
-**Group memberships from sysexts** (`libvirt`, `incus-admin`, …) are bound
-by `myosi-homed-user@<you>.service`, which reads
-`/usr/share/myosi/user-groups.d/*.conf`. It is not enabled by default. Once
-your user exists, enable the instance so `myosi extension-enable` keeps your
-groups in sync:
+**Alternative — create it by hand.** If you would rather not keep a record
+file, `homectl create` does the same thing; these are the flags the helper
+would have applied (`defcontext=` is REQUIRED, or SELinux denies
+sudo/sshd/keyring — see 3a.1 for each one's rationale):
 
 ```bash
-systemctl enable --now myosi-homed-user@<you>.service
+homectl create <you> \
+    --uid=1000 --real-name="<Your Name>" --member-of=wheel \
+    --shell=/usr/bin/fish --storage=luks --disk-size=50G --fs-type=btrfs \
+    --luks-discard=yes --luks-offline-discard=no \
+    --luks-extra-mount-options=defcontext=system_u:object_r:user_home_dir_t:s0
 ```
 
-This works even though `/usr` is a read-only erofs image: `systemctl enable`
+Enable the unit afterwards anyway — with no record file it skips creation
+and does group binding only, which is exactly what you want at that point.
+
+**Group memberships from sysexts** (`libvirt`, `incus-admin`, …) come from
+`/usr/share/myosi/user-groups.d/*.conf`, which the same unit reads in its
+second phase. That is why step 3 leaves the instance enabled rather than
+just running it once.
+
+Enabling works even though `/usr` is a read-only erofs image: `systemctl enable`
 writes a symlink into `/etc/systemd/system/…​.wants/` pointing *at* the unit
 in `/usr`. `/etc` is a writable btrfs subvolume on data-luks, so the
 enablement also **survives A/B image updates** — the root slot rolls over,
@@ -641,33 +664,24 @@ enablement also **survives A/B image updates** — the root slot rolls over,
 the symlink dangles whenever that sysext is disabled. Those use `Upholds=`
 drop-ins instead — see "Enabling units without presets".)
 
-**Enabling the unit does not create the user** — do `homectl create` first.
-The helper only creates from a declarative identity file, and it searches:
+**Creation is driven entirely by the record file.** The helper searches two
+places, in order:
 
 1. `/etc/myosi/users/<name>.user` — writable, operator-authorable
-   post-install, survives A/B image updates
-2. `/usr/share/myosi/users/<name>.user` — baked, read-only
+   post-install, survives A/B image updates. This is the one you use
+2. `/usr/share/myosi/users/<name>.user` — baked, read-only erofs, so
+   operators cannot add records here. Only `user.user` ships, as an example
 
-With neither present (the normal manual path above) phase 1 is skipped and
-the unit does group binding only, which is exactly what you want once
-`homectl create` has already made the user.
+With a record for `<name>`, enabling the instance creates the user and binds
+groups. With no record it binds groups only — so `systemctl enable --now
+myosi-homed-user@<you>.service` on a name you never wrote a file for will
+not conjure a user. (`@user` is the one exception: `user.user` is baked, so
+enabling that instance does create the generic user.)
 
-If you'd rather have it **declaratively**, write the record to `/etc` and let
-the unit create it — no rebuild, no `homectl create` by hand:
+Editing the record later does **not** update an existing user — creation is
+one-shot, gated on `homectl inspect`. Use `homectl update` for that.
 
-```bash
-# see /etc/myosi/users/README for the full field list
-cat >/etc/myosi/users/<you>.user <<'EOF'
-{ "userName": "<you>", "uid": 1000, "gid": 1000,
-  "realName": "<Your Name>", "homeDirectory": "/home/<you>",
-  "shell": "/usr/bin/fish", "memberOf": ["wheel","video","render","input","kvm"],
-  "service": "io.systemd.Home", "enforcePasswordPolicy": false }
-EOF
-systemctl enable --now myosi-homed-user@<you>.service   # creates + binds
-homectl passwd <you>                                    # rotate off `changeme`
-```
-
-To pre-bake instead on a rebuilt image, ship
+To pre-bake a user on a rebuilt image instead, ship
 `usr/share/myosi/users/<you>.user` plus a
 `multi-user.target.wants/myosi-homed-user@<you>.service` symlink through a
 private `mkosi.local.conf` `ExtraTrees=` overlay. Do **not** additionally
@@ -806,9 +820,8 @@ full `--disk-size` (see the sparse-copy warning in Troubleshooting).
 | interactive user | **none** | You create it on first boot — see [Post-installation](#post-installation) |
 
 So out of the box, only **root at the console** can log in. Everything else
-starts from there. Override the bootstrap hash for real fleets: bake your
-own over `etc/shadow` via `mkosi.local.conf` `ExtraTrees=`, or pass a
-`firstboot.root-password-hashed` credential on the ESP.
+starts from there. Override the bootstrap hash for real fleets by baking
+your own over `etc/shadow` via `mkosi.local.conf` `ExtraTrees=`.
 
 **Upgrading user's home to LUKS + TPM2 (single-host, console-driven):**
 
@@ -1862,7 +1875,7 @@ Hashes are baked into `mkosi.extra/etc/shadow` (sha-512 + fixed salt for reprodu
 2. `homectl create <you> --uid=1000 ...` — create the real, properly-named user. See [Post-installation](#post-installation) for the full command and why the name can't be changed later.
 3. Verify `<you>` can log in on another TTY, then `passwd -l root` to destroy the bootstrap credential.
 
-The image ships exactly one known credential, it is unusable remotely, and step 3 removes it. Override the baked hash for real fleets via `mkosi.local.conf` `ExtraTrees=` or a `firstboot.root-password-hashed` ESP credential.
+The image ships exactly one known credential, it is unusable remotely, and step 3 removes it. Override the baked hash for real fleets via `mkosi.local.conf` `ExtraTrees=`.
 
 **SSH:**
 - Key-only (`PasswordAuthentication no`)
