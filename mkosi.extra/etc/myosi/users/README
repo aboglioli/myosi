@@ -1,0 +1,49 @@
+Declarative homed user records — operator-authorable, no image rebuild.
+======================================================================
+
+Drop <name>.user here, then enable the matching unit:
+
+    systemctl enable --now myosi-homed-user@<name>.service
+
+/usr/libexec/myosi/homed-user-provision searches this directory FIRST, then
+the baked /usr/share/myosi/users/. This directory is on the /etc btrfs subvol
+(data-luks), so it is writable at runtime — unlike /usr, which is a read-only
+erofs image — and it survives A/B image updates.
+
+The record is the "regular" section of a systemd user record; storage flags
+(--storage, --disk-size, --luks-*) are CLI flags applied by the helper, NOT
+fields here. See homectl(1) and https://systemd.io/USER_RECORD/.
+
+Example — /etc/myosi/users/alan.user:
+
+    {
+        "userName": "alan",
+        "uid": 1000,
+        "gid": 1000,
+        "realName": "Alan Example",
+        "homeDirectory": "/home/alan",
+        "shell": "/usr/bin/fish",
+        "memberOf": ["wheel", "video", "render", "input", "kvm"],
+        "preferredLanguage": "en_US.UTF-8",
+        "service": "io.systemd.Home",
+        "enforcePasswordPolicy": false
+    }
+
+The home is created with the bootstrap password `changeme` (override with
+MYOSI_BOOTSTRAP_PASSWORD in a unit drop-in). Rotate it immediately:
+
+    homectl passwd <name>
+
+Notes
+-----
+- uid 1000 marks the primary user. If that UID already belongs to someone
+  else, the helper skips creation and binds groups to the existing owner
+  instead — it will not clobber an established user.
+- Creation is one-shot, gated on `homectl inspect`. Editing this file later
+  does NOT update an existing record; use `homectl update` for that.
+- You do not need a file here at all. The documented first-boot path is
+  `homectl create` by hand; enabling the unit afterwards still binds sysext
+  groups (phase 2 runs whether or not an identity exists).
+- Pick the username carefully. systemd 259 has no `homectl rename`.
+
+This README is ignored — only files matching <name>.user are read.
