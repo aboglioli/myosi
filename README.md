@@ -635,6 +635,20 @@ Leaving the instance enabled is what keeps your groups in sync: every
 `myosi extension-enable` re-runs it, so a sysext that introduces a new group
 binds it on the spot.
 
+Step 3 also allocates the `/etc/subuid` + `/etc/subgid` ranges rootless
+podman, distrobox and incus need. Nothing else maintains those files — a
+homed record has no field that feeds them, and `usermod --add-subuids`
+refuses homed users because they are not in `/etc/passwd`. The helper takes
+the first free `1000000`-wide gap at or above `100000`, so it is safe on a
+pre-existing file with custom entries; an existing entry for your name is
+left alone, and if nothing fits it says so rather than writing a bad range.
+Verify with:
+
+```bash
+grep "^<you>:" /etc/subuid /etc/subgid
+podman unshare cat /proc/self/uid_map     # as <you>, after logging in
+```
+
 **Alternative — create it by hand.** If you would rather not keep a record
 file, `homectl create` does the same thing; these are the flags the helper
 would have applied (`defcontext=` is REQUIRED, or SELinux denies
@@ -1885,7 +1899,7 @@ The image ships exactly one known credential, it is unusable remotely, and step 
 
 **sudo:** `%wheel ALL=(ALL) ALL`. `user` is in `wheel`. Prompts for password each `timestamp_timeout=15` minutes.
 
-**Rootless podman:** `user` gets `subuid` + `subgid` range `100000:65536`; `root` gets `1000000:65536`.
+**Rootless podman:** `/etc/subuid` + `/etc/subgid` bake only the static image-owned identities — `root` at `1500000:200000`, `containers` at `2000000:1000000`. The interactive user is **not** baked (the image ships none, and the name is per-host); `myosi-homed-user@<name>` allocates it the first free `1000000`-wide gap at or above `100000` on provisioning.
 
 ---
 
