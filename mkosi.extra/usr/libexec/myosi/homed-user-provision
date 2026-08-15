@@ -1,22 +1,39 @@
 #!/usr/bin/env bash
-# Provision a homed-managed user from /usr/share/myosi/users/<name>.user,
-# then bind it to groups declared under /usr/share/myosi/user-groups.d/.
+# Provision a homed-managed user from <name>.user, then bind it to groups
+# declared under /usr/share/myosi/user-groups.d/.
 # Runs as templated myosi-homed-user@<name>.service — NOT homed
 # ExecStartPost: homed is Type=notify and sends READY=1 before ExecStartPost,
 # masking provisioning failures (and hiding them from the console).
 # Re-triggered after live sysext refresh to bind new groups. Idempotent.
+#
+# Two supported shapes, both ending in a group-bound user:
+#   declarative — drop <name>.user in /etc/myosi/users (post-install, no
+#                 rebuild) or bake it at /usr/share/myosi/users; phase 1
+#                 creates the record, phase 2 binds groups.
+#   manual      — operator runs `homectl create` by hand (the documented
+#                 first-boot path, since the image ships no user and /usr is
+#                 read-only erofs so no identity can be added there). There is
+#                 no identity file at all: phase 1 is skipped, phase 2 still
+#                 runs. This is why the identity is NOT a hard precondition —
+#                 bailing early here left operator-created users permanently
+#                 unbound from sysext groups.
 
 set -euo pipefail
 
 NAME=${1:?usage: homed-user-provision <username>}
-IDENTITY=/usr/share/myosi/users/${NAME}.user
 DROP_DIR=/usr/share/myosi/user-groups.d
 BOOTSTRAP_PASSWORD="${MYOSI_BOOTSTRAP_PASSWORD:-changeme}"
 
-if [ ! -f "$IDENTITY" ]; then
-    echo "homed-user-provision: no identity at $IDENTITY, nothing to do" >&2
-    exit 0
-fi
+# Identity search path: writable /etc first — it is operator-authorable
+# post-install and persists across A/B image updates — then the baked image
+# default. Empty means "manual shape", handled above.
+IDENTITY=
+for candidate in "/etc/myosi/users/${NAME}.user" "/usr/share/myosi/users/${NAME}.user"; do
+    if [ -f "$candidate" ]; then
+        IDENTITY="$candidate"
+        break
+    fi
+done
 
 # Phase 1 — create user record + LUKS-backed home if missing.
 # PASSWORD/NEWPASSWORD env: homed 259 (F44) ignores the secret section of
@@ -34,16 +51,37 @@ fi
 # the logout shrink gains nothing.
 # Skip when the record's UID already belongs to another user — hosts
 # that provision their own primary user don't want the default one.
-RECORD_UID=$(jq -r '.uid // empty' "$IDENTITY" 2>/dev/null)
+RECORD_UID=$([ -n "$IDENTITY" ] && jq -r '.uid // empty' "$IDENTITY" 2>/dev/null || true)
 if [ -n "$RECORD_UID" ] && ! homectl inspect "$NAME" >/dev/null 2>&1; then
-    EXISTING=$(getent passwd "$RECORD_UID" | cut -d: -f1)
+    # No pipeline here. `getent passwd <uid>` exits 2 when the UID is unused —
+    # the normal fresh-install case — and under `set -o pipefail` that status
+    # propagates through the pipe to the assignment, so `set -e` killed the
+    # script BEFORE it created the user. Same class of bug as the phase-2
+    # `grep -q` note below; keep both pure-bash.
+    EXISTING=
+    if passwd_entry=$(getent passwd "$RECORD_UID" 2>/dev/null); then
+        EXISTING=${passwd_entry%%:*}
+    fi
     if [ -n "$EXISTING" ] && [ "$EXISTING" != "$NAME" ]; then
-        echo "homed-user-provision: uid ${RECORD_UID} already owned by '${EXISTING}', skipping '$NAME'" >&2
-        exit 0
+        # Retarget instead of bailing out: skipping the whole script also
+        # skipped phase 2, so a host that provisioned its own primary user
+        # (the documented escape hatch, and any pre-genericisation install)
+        # silently never got bound to sysext-declared groups — new drop-ins
+        # just never applied. Rebinding NAME keeps creation gated (the
+        # homectl inspect below now succeeds) while phase 2 runs against the
+        # user that actually owns the UID.
+        echo "homed-user-provision: uid ${RECORD_UID} owned by '${EXISTING}', not '${NAME}' — binding groups to '${EXISTING}'" >&2
+        NAME="$EXISTING"
+        # Clearing IDENTITY drops us into the "manual shape": phase 1 is
+        # skipped, phase 2 binds. The UID is demonstrably taken, so creation
+        # is never right here — and without this, a UID 1000 owned by a
+        # NON-homed user would send `homectl create <them>` an identity file
+        # whose userName is somebody else.
+        IDENTITY=
     fi
 fi
 
-if ! homectl inspect "$NAME" >/dev/null 2>&1; then
+if [ -n "$IDENTITY" ] && ! homectl inspect "$NAME" >/dev/null 2>&1; then
     echo "homed-user-provision: creating homed record for '$NAME' from $IDENTITY" >&2
     PASSWORD="$BOOTSTRAP_PASSWORD" NEWPASSWORD="$BOOTSTRAP_PASSWORD" \
         homectl create "$NAME" \
@@ -60,6 +98,19 @@ fi
 # Phase 2 — bind user to groups declared by active sysexts / profile
 # features. Drop-ins ship from each feature's mkosi.extra AND its sysext
 # sub-image (same source tree via ExtraTrees), so both bake paths see them.
+#
+# Gate on the user EXISTING, not on an identity file: the manual shape has no
+# identity, and this is the only thing that keeps an operator-created user in
+# sync with sysext groups.
+if ! homectl inspect "$NAME" >/dev/null 2>&1; then
+    if [ -n "$IDENTITY" ]; then
+        echo "homed-user-provision: '$NAME' still absent after phase 1, not binding groups" >&2
+    else
+        echo "homed-user-provision: no identity for '$NAME' and no such homed user — create it first ('homectl create $NAME --uid=1000 ...'), nothing to do" >&2
+    fi
+    exit 0
+fi
+
 [ -d "$DROP_DIR" ] || exit 0
 
 declare -A wanted
