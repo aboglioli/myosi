@@ -28,9 +28,13 @@ done
 # 260+); homectl honours these env vars instead.
 # defcontext=: homectl doesn't label inside the LUKS image, and unlabeled_t
 # makes SELinux deny sudo/sshd/keyring.
-# --luks-offline-discard=no: the default shrinks the stack on logout, and homed
-# SIGKILLs the worker 30 s into shutdown — an interrupted shrink leaves btrfs
-# small inside a full-size LUKS device that the next boot never regrows.
+# --luks-offline-discard=no: skips the logout FITRIM. Online discard already
+# reclaimed everything it would find.
+# --auto-resize-mode=grow: the LUKS default is shrink-and-grow, which minimizes
+# the whole stack on logout — a separate gate from the discard flags. homed
+# SIGKILLs the worker 30 s into shutdown, and an interrupted shrink leaves btrfs
+# small inside a full-size LUKS device that the next boot never regrows. `grow`
+# keeps the login-time regrow, which repairs an image that is already too small.
 RECORD_UID=$([ -n "$IDENTITY" ] && jq -r '.uid // empty' "$IDENTITY" 2>/dev/null || true)
 if [ -n "$RECORD_UID" ] && ! homectl inspect "$NAME" >/dev/null 2>&1; then
     # No pipeline: getent exits 2 on an unused uid, and pipefail turned that
@@ -58,6 +62,7 @@ if [ -n "$IDENTITY" ] && ! homectl inspect "$NAME" >/dev/null 2>&1; then
             --fs-type=btrfs \
             --luks-discard=yes \
             --luks-offline-discard=no \
+            --auto-resize-mode=grow \
             --luks-extra-mount-options=defcontext=system_u:object_r:user_home_dir_t:s0 \
             --password-hint="Default password: ${BOOTSTRAP_PASSWORD} — change with 'homectl passwd ${NAME}'"
 fi

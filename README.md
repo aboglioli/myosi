@@ -530,6 +530,11 @@ fix in this development cycle. Quick index:
   remains a symlink into `/var` for operator-mounted filesystems.
 - The `version` file no longer claims a bootc base image — myosi
   builds from RPMs via mkosi, not from an OCI base.
+- homed's logout shrink of a LUKS home is controlled by
+  `--auto-resize-mode`, **not** by `--luks-offline-discard`. The two are
+  separate gates and an earlier round of this doc conflated them; setting
+  only the discard flag left a 20 s+ minimize on every shutdown. See
+  [the sizing policy](#3a1-user-management-with-systemd-homed).
 
 ---
 
@@ -658,7 +663,7 @@ sudo/sshd/keyring — see 3a.1 for each one's rationale):
 homectl create <you> \
     --uid=1000 --real-name="<Your Name>" --member-of=wheel \
     --shell=/usr/bin/fish --storage=luks --disk-size=50G --fs-type=btrfs \
-    --luks-discard=yes --luks-offline-discard=no \
+    --luks-discard=yes --luks-offline-discard=no --auto-resize-mode=grow \
     --luks-extra-mount-options=defcontext=system_u:object_r:user_home_dir_t:s0
 ```
 
@@ -727,7 +732,7 @@ flags). `myosi-homed-user@<name>.service` runs
 `/usr/libexec/myosi/homed-user-provision <name>` on first boot,
 which calls `homectl create --identity=<file> --storage=luks
 --disk-size=50G --luks-discard=yes --luks-offline-discard=no
---luks-extra-mount-options=defcontext=...` with the
+--auto-resize-mode=grow --luks-extra-mount-options=defcontext=...` with the
 bootstrap password fed via `PASSWORD` / `NEWPASSWORD` env vars.
 After creation, homed registers the record in its private database
 at `/var/lib/systemd/home/` and `homectl inspect` gates re-runs of
@@ -759,48 +764,72 @@ blocks 5-10 min on slow CPUs / emulated TPM during LUKS format.
         └── (when activated → /home/user, inner btrfs)
 ```
 
-**Discard policy — `--luks-discard=yes --luks-offline-discard=no`:**
-These are two different mechanisms with confusingly similar names.
+**Sizing policy — `--luks-discard=yes --luks-offline-discard=no
+--auto-resize-mode=grow`:** three mechanisms, easily confused. Two are
+discard flags; the one that actually resizes the home is neither of them.
+In `systemd-homework` they are three independent gates, all evaluated on
+the same logout path (`src/home/homework.c:1014-1028`, systemd 259).
 
-*Online* discard is the `discard` mount option on the inner btrfs. It
-reclaims space continuously while the user is logged in, through the
-whole stack: inner btrfs → dm-crypt (`allow_discards`) → loop device →
-`FALLOC_FL_PUNCH_HOLE` on the `.home` file → outer btrfs frees the
-extents. A 50 GiB home holding 9 GiB really occupies ~9 GiB of
+*Online* discard (`--luks-discard=yes`) is the `discard` mount option on
+the inner btrfs. It reclaims space continuously while the user is logged
+in, through the whole stack: inner btrfs → dm-crypt (`allow_discards`) →
+loop device → `FALLOC_FL_PUNCH_HOLE` on the `.home` file → outer btrfs
+frees the extents. A 50 GiB home holding 9 GiB really occupies ~9 GiB of
 data-luks. This is what keeps the sparse image honest — keep it on.
 
-*Offline* discard (systemd's default is **on**, we turn it **off**) is
-what homed does at logout: FITRIM, then minimize the entire stack —
-shrink btrfs to its floor, shrink LUKS, truncate the image file,
-rewrite the partition table — and grow it all back at the next login.
-Two problems:
+*Offline* discard (`--luks-offline-discard=no`; systemd's default is
+**on**) is a plain FITRIM at logout, in `home_trim_luks()`. We turn it
+off because it reclaims almost nothing online discard has not already
+reclaimed — it only truncates the tail of an already-hole-punched sparse
+file. Turning it off also makes homed `fallocate()` the image instead, so
+the file's *apparent* size stays at the full `--disk-size` (see the
+sparse-copy warning in Troubleshooting). `fstrim.timer` (weekly, enabled
+by default) remains the backstop.
 
-1. It reclaims almost nothing that online discard hasn't already
-   reclaimed. It only truncates the tail of an already-hole-punched
-   sparse file.
-2. **It corrupts the home's size when interrupted.** btrfs can only
-   shrink online, via a slow relocate loop (8 s on a quiet home, 45 s+
-   on a busy one). `systemd-homed` waits a hardcoded 30 s for the
-   worker during shutdown, then `SIGKILL`s it — this is homed-internal,
-   *not* tunable via `TimeoutStopSec=`. The kill lands mid-loop, so
-   btrfs ends up shrunk (~13 G) inside a still-50 G LUKS device. On the
-   next boot homed's grow path compares the *image file* size against
-   the record's `diskSize`, sees 50 G == 50 G, logs `Image size already
-   matching, skipping operation`, and never asks btrfs — so `df` reports
-   a ~13 G home, permanently, until someone runs `btrfs filesystem
-   resize max` by hand. Observed on 2 of 6 consecutive boots.
+*Auto-resize mode* (`--auto-resize-mode=grow`) is the one that resizes.
+**It is not gated on either discard flag** — a common and expensive
+misreading. `user_record_auto_resize_mode()` (`src/shared/user-record.c:2152`)
+returns `shrink-and-grow` for **any** `--storage=luks` record that does
+not set the field, and that mode makes `home_auto_shrink_luks()` minimize
+the entire stack at logout — shrink btrfs to its floor, shrink LUKS,
+truncate the image file, rewrite the partition table — then grow it all
+back at the next login. Two problems:
+
+1. **It stalls shutdown.** btrfs can only shrink online, via a slow
+   relocate loop. A 50 G → 12 G minimize took 21 s of an otherwise 2 s
+   shutdown on real hardware (NVMe, AES-NI).
+2. **It corrupts the home's size when interrupted.** `systemd-homed`
+   waits a hardcoded 30 s for the worker during shutdown, then `SIGKILL`s
+   it — homed-internal, *not* tunable via `TimeoutStopSec=`. If the kill
+   lands mid-relocate, btrfs ends up shrunk (~13 G) inside a still-50 G
+   LUKS device. On the next boot homed's grow path compares the *image
+   file* size against the record's `diskSize`, sees 50 G == 50 G, logs
+   `Image size already matching, skipping operation`
+   (`homework-luks.c:3245`), and never asks btrfs — so `df` reports a
+   ~13 G home, permanently, until someone runs `btrfs filesystem resize
+   max` by hand. Observed on 2 of 6 consecutive boots.
+
+`grow` rather than `off`: it suppresses the logout shrink identically,
+while keeping `home_auto_grow_luks()` on the activation path
+(`homework-luks.c:1593`) as a repair route for an image that is already
+too small — a restored backup, or a home shrunk before this setting was
+applied. Once nothing shrinks the image, that path is a no-op that logs
+`Image size already matching` and returns before touching the device.
+Use `off` only if you want homed to never touch the geometry unasked.
 
 Symptom to recognize: `btrfs filesystem usage $HOME` shows a large
 `Device slack:` value. Repair is online and non-destructive:
 
 ```bash
 sudo btrfs filesystem resize max /home/<user>
-homectl update <user> --luks-offline-discard=no   # stop it recurring
+homectl update <user> --auto-resize-mode=grow    # stop it recurring
 ```
 
-Cost of turning it off: the image file's *apparent* size stays at the
-full `--disk-size` (see the sparse-copy warning in Troubleshooting).
-`fstrim.timer` (weekly, enabled by default) remains the backstop.
+Note that `--luks-offline-discard=no` alone does **not** stop it: the
+FITRIM disappears from the logout path, the minimize does not. The
+giveaway in the journal is a `Ready to resize image size 50G → 11.9G`
+line at deactivation on a record that already reports
+`LUKS Discard: online=yes offline=no`.
 
 **First-boot flow:**
 
