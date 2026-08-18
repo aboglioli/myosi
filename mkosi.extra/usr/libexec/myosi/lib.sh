@@ -18,6 +18,32 @@ validate_name() {
     esac
 }
 
+# Release source, most specific first: an explicit caller argument, then
+# $MYOSI_REPO, then /etc/myosi/repo (written by `myosi set-repo` — lives on
+# the persistent /etc subvol, so it survives A/B image updates), then the
+# upstream default baked into the image. Forks override without a rebuild.
+MYOSI_DEFAULT_REPO=aboglioli/myosi
+
+myosi_repo() {
+    local line stripped
+    if [ -n "${MYOSI_REPO:-}" ]; then
+        printf '%s\n' "$MYOSI_REPO"
+        return 0
+    fi
+    if [ -r /etc/myosi/repo ]; then
+        # No pipeline: a `head -1` here can SIGPIPE the read under pipefail.
+        while IFS= read -r line || [ -n "$line" ]; do
+            stripped=${line%%#*}
+            stripped=${stripped//[[:space:]]/}
+            if [ -n "$stripped" ]; then
+                printf '%s\n' "$stripped"
+                return 0
+            fi
+        done < /etc/myosi/repo
+    fi
+    printf '%s\n' "$MYOSI_DEFAULT_REPO"
+}
+
 _gh_auth_ok() {
     command -v gh >/dev/null && gh auth status --hostname github.com >/dev/null 2>&1
 }
@@ -48,7 +74,7 @@ _gh_curl_auth_args() {
 
 # Explicit calver passes through; "latest"/empty resolves via the release API.
 resolve_version() {
-    local v="${1:-}" repo="${2:-${MYOSI_REPO:-aboglioli/myosi}}"
+    local v="${1:-}" repo="${2:-$(myosi_repo)}"
     if [ -n "$v" ] && [ "$v" != latest ]; then
         printf '%s\n' "$v"
         return 0
@@ -57,7 +83,7 @@ resolve_version() {
 }
 
 resolve_latest_release() {
-    local repo="${1:-aboglioli/myosi}"
+    local repo="${1:-$(myosi_repo)}"
     local version=""
     # Prefer gh when present + authed (private repos require auth).
     if _gh_auth_ok; then
@@ -83,7 +109,7 @@ resolve_latest_release() {
 # List release asset names (gh first, REST fallback) — callers use this to
 # detect single-file vs split .partNN releases.
 list_release_assets() {
-    local version="$1" repo="${2:-aboglioli/myosi}"
+    local version="$1" repo="${2:-$(myosi_repo)}"
     if _gh_auth_ok; then
         if gh release view "$version" --repo "$repo" \
                 --json assets --jq '.assets[].name' 2>/dev/null; then
@@ -101,7 +127,7 @@ list_release_assets() {
 # the stable per-tag URL, no auth. Falls back to gh, then the token-authed
 # assets API (still works if the repo ever goes private). Nonzero on failure.
 download_release_asset() {
-    local version="$1" name="$2" dest="$3" repo="${4:-aboglioli/myosi}"
+    local version="$1" name="$2" dest="$3" repo="${4:-$(myosi_repo)}"
     if curl -fsSL -o "$dest" \
             "https://github.com/${repo}/releases/download/${version}/${name}" 2>/dev/null; then
         return 0

@@ -1,9 +1,12 @@
 # Main-image unit activation policy (applied by preset-all in postinst).
 # Tier split: main-image units -> enable here; initrd-only units -> static
 # .wants/ in mkosi.images/initrd (preset doesn't reach initrd);
-# profile/sysext units -> Upholds= drop-in on the target (works both baked
-# and sysext-merged; unlike .wants/, Upholds= re-evaluates on runtime
-# sysext refresh + daemon-reload, so units auto-start without reboot).
+# profile/sysext units -> target drop-in (works both baked and
+# sysext-merged, unlike .wants/). Pick the verb by unit shape, NOT by
+# habit: Upholds= only for units that STAY active (sockets, daemons) —
+# it re-evaluates on refresh + daemon-reload; Wants= for oneshots and
+# anything Condition-gated, because Upholds= busy-loops retrying a unit
+# that goes inactive. See README "Enabling units without presets".
 # preset-all silently skips lines whose unit isn't in main /usr.
 
 enable myosi-sysext-relabel.service

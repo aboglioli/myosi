@@ -165,7 +165,8 @@ kmod_depmod_after_strip() {
 # No-op stub kept so callers keep working. Shipping modules.dep in a
 # sysext is futile: mkosi v26 mount_base_trees() strips any overlay
 # path that exists in the base-tree regardless of content. The host-
-# side fix is myosi-depmod.service (tmpfs overlay + depmod -a).
+# side fix is /usr/libexec/myosi/sysext-modules-refresh (tmpfs overlay +
+# depmod -a), run as systemd-sysext.service ExecStartPost.
 kmod_mark_indices_unique() {
     :
 }

@@ -50,11 +50,21 @@ jobs:
           pip install --break-system-packages git+https://github.com/systemd/mkosi.git
       - name: Lint shell scripts
         run: |
-          shopt -s globstar nullglob
-          for f in **/*.sh mkosi.prepare mkosi.postinst mkosi.version; do
-            [ -f "$f" ] || continue
-            shellcheck -S warning "$f" || true
-          done
+          # Select by shebang, not by extension. Every script that runs on a
+          # host at boot is extensionless (homed-user-provision, sysext-select,
+          # data-attach, the myosi CLI, every sub-image mkosi.postinst), so an
+          # `*.sh` glob covered 4 files and missed 16 — including all of them.
+          mapfile -t files < <(
+            grep -rlE '^#!.*\b(ba)?sh\b' --exclude-dir=.git --exclude-dir=build . | sort
+          )
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "ERROR: shebang scan matched no scripts — the selector is broken" >&2
+            exit 1
+          fi
+          printf 'linting %d scripts\n' "${#files[@]}"
+          printf '  %s\n' "${files[@]}"
+          # No `|| true`: this gate used to swallow every finding.
+          shellcheck -S warning "${files[@]}"
       - name: mkosi summary (parse check)
         env:
           # Validate doesn't have access to release secrets; let the
