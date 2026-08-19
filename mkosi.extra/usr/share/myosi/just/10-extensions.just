@@ -20,7 +20,7 @@ extension-enable name version="":
         exit 4
     fi
 
-    REPO="${MYOSI_REPO:-aboglioli/myosi}"
+    REPO=$(myosi_repo)
 
     # No pipeline into head -1 — it can SIGPIPE the producer under
     # pipefail.

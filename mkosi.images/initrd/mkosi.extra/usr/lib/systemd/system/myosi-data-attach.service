@@ -11,8 +11,13 @@ DefaultDependencies=no
 # what activate the unit — mkosi-initrd never runs preset-all.
 IgnoreOnIsolate=yes
 OnFailure=emergency.target
-After=sysroot.mount systemd-repart.service systemd-udevd.service systemd-udev-settle.service cryptsetup-pre.target
-Wants=sysroot.mount systemd-repart.service systemd-udev-settle.service
+# No systemd-udev-settle.service: it is deprecated (udevadm logs
+# "Please fix myosi-data-attach.service not to pull it in") and redundant
+# here — data-attach runs `udevadm settle` itself, at the three points it
+# actually needs a drained queue, which is the same guarantee scoped to
+# this unit instead of the whole initrd transaction.
+After=sysroot.mount systemd-repart.service systemd-udevd.service cryptsetup-pre.target
+Wants=sysroot.mount systemd-repart.service
 Before=sysroot-etc.mount myosi-etc-seed.service initrd.target initrd-switch-root.target
 Conflicts=shutdown.target
 

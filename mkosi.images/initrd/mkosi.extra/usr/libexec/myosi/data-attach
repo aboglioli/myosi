@@ -100,7 +100,7 @@ var_partition_on_disk() {
     # Guard rail: primary data partition MUST be on the boot disk — otherwise
     # an external myosi USB's data-luks would unlock into /dev/mapper/data.
     local disk="$1"
-    local disk_node disk_sys found= part_sys candidate type
+    local disk_node disk_sys found='' part_sys candidate type
 
     disk_node=$(basename "$disk")
     disk_sys="/sys/class/block/${disk_node}"
