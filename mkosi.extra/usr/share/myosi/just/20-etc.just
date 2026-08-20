@@ -20,10 +20,9 @@ UPPER   := "/.etc/etc"
 etc-list:
     #!/usr/bin/env bash
     set -uo pipefail
-    if ! mountpoint -q /.etc; then
-        echo "/.etc is not mounted — /etc is not overlay-backed on this boot." >&2
-        exit 1
-    fi
+    # Without the upper we cannot tell what is overridden, and a
+    # reassuring answer would be a wrong one.
+    mountpoint -q /.etc || { echo "/.etc is not mounted — /etc is not overlay-backed on this boot." >&2; exit 1; }
     # A deleted factory file leaves an overlayfs whiteout in the upper: a
     # character device with major/minor 0:0, not a regular file.
     cd {{UPPER}}
@@ -54,6 +53,9 @@ etc-reset path:
     set -euo pipefail
     . /usr/libexec/myosi/lib.sh
     require_root
+    # Without the upper we cannot tell what is overridden, and a
+    # reassuring answer would be a wrong one.
+    mountpoint -q /.etc || { echo "/.etc is not mounted — /etc is not overlay-backed on this boot." >&2; exit 1; }
     rel="{{path}}"; rel="${rel#/etc/}"
     case "$rel" in ''|/*|*..*) echo "ERROR: bad path: {{path}}" >&2; exit 2;; esac
     if [ ! -e "{{UPPER}}/$rel" ]; then
@@ -72,6 +74,9 @@ etc-prune apply="":
     #!/usr/bin/env bash
     set -uo pipefail
     . /usr/libexec/myosi/lib.sh
+    # Without the upper we cannot tell what is overridden, and a
+    # reassuring answer would be a wrong one.
+    mountpoint -q /.etc || { echo "/.etc is not mounted — /etc is not overlay-backed on this boot." >&2; exit 1; }
     dead=()
     # An upper file identical to the image's version: overriding nothing.
     while IFS= read -r rel; do

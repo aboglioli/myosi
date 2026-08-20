@@ -249,7 +249,7 @@ yours. So the upper is the complete, exact list of local changes —
 `myosi etc-list` reads it directly, with nothing to diff and nothing to
 remember after an upgrade.
 
-**Three units, no scripts.** The whole boot path is declarative:
+**Three units, no new scripts.** Assembling `/etc` is entirely declarative:
 
 | Unit | Does |
 |---|---|
@@ -333,6 +333,7 @@ firmware → shim → systemd-boot → UKI (signed; kernel + initrd + cmdline + 
    real root: var.mount + home.mount + srv.mount (explicit units, all
                 BindsTo=dev-mapper-data.device, Before=local-fs.target)
               systemd-sysext → merge /usr extensions
+```
 
 ### Modern-kernel sysctl + module ordering
 
@@ -1672,9 +1673,16 @@ create an empty one, and `/etc` comes up as the bare factory tree — the
 host boots, but amnesiac: factory hostname, no ssh host keys, no
 NetworkManager connections, a fresh machine-id.
 
-Booting the previous A/B slot from the sd-boot menu is the way back: the
-old initrd mounts `subvol=/etc` flat and finds the old tree exactly where
-it left it, because migration never moved it.
+Booting the previous A/B slot from the sd-boot menu is the way back
+**while the host is still un-migrated**: the old initrd mounts
+`subvol=/etc` flat and finds its tree untouched, because the new image
+only ever added an `etc/` subdirectory alongside it.
+
+That stops being true once you migrate. After the contents move into
+`etc/`, an old image mounting `subvol=/etc` flat sees `etc/` and `.work/`
+where it expects `passwd` and `selinux/`, and pid 1 freezes on the policy
+load. Rolling back across the migration therefore needs the same
+procedure in reverse, which is part of what the runbook still owes.
 
 The migration shape is settled and validated in a scratch pool, it just
 has no runbook yet: move the subvolume's contents into an `etc/`
@@ -2237,7 +2245,7 @@ slirp4netns works but is slow, IPv6-limited, and the legacy default. pasta (pass
 systemd-sysusers, systemd-machine-id-commit, sshd-keygen, NetworkManager, and password changes need writable `/etc` at runtime. myosi gets that from an overlay whose upper is a btrfs subvolume on `data-luks`: writes land in `/.etc/etc`, everything else is read straight from the verity-baked factory tree. Host-owned config should still prefer signed sysexts; local `/etc` edits are for machine-local state and emergency overrides.
 
 **Why is `/etc` an overlay instead of a plain btrfs subvolume?**
-A plain subvolume has to be seeded once and is then frozen: files added to `/usr/share/factory/etc` in later images never arrive, changed defaults never apply, and reconciliation depends on an operator remembering to diff after every upgrade. That is not a hypothetical — this fleet ran for months without `/etc/myosi/users/` and with a stale `selinux/targeted/policy/` because both were added to the factory tree after first boot. The overlay inverts the default: untouched paths track the image, touched paths stay yours, and the upper is an exact record of the difference.
+A plain subvolume has to be seeded once and is then frozen: files added to `/usr/share/factory/etc` in later images never arrive, changed defaults never apply, and reconciliation depends on an operator remembering to diff after every upgrade. That is not a hypothetical — on this host `/etc/myosi/users/` is absent and `selinux/targeted/contexts/` is stale, because both changed in the factory tree after first boot and nothing carries such changes across. The overlay inverts the default: untouched paths track the image, touched paths stay yours, and the upper is an exact record of the difference.
 
 An earlier overlay attempt was retired, but its problems were all properties of putting the upper at `/var/etc` — `/var` cannot mount before `/etc`, PID 1 pinned `var.mount` open at shutdown, and the upper's SELinux context was cached before the first-boot relabel. Keeping the layers inside the `/etc` subvolume, mounted at `/.etc` in the initrd, removes all three. The remaining cost is real and specific: copy-up is per-file and permanent until reset, so a file touched for any reason stops tracking the image until `myosi etc-prune` or `myosi etc-reset` puts it back — `myosi etc-list` is what makes that visible rather than silent.
 
