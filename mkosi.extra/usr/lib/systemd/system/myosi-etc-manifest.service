@@ -1,0 +1,16 @@
+[Unit]
+Description=Record the factory /etc checksum manifest for this image version
+Documentation=https://github.com/aboglioli/myosi/blob/main/README.md
+# Needs /var (manifest store) and the merged /usr (factory tree is baked,
+# but sysexts may add to it). Runs once per IMAGE_VERSION; the helper
+# no-ops when the manifest already exists.
+After=local-fs.target systemd-sysext.service
+Wants=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/myosi/etc-manifest
+
+[Install]
+WantedBy=multi-user.target

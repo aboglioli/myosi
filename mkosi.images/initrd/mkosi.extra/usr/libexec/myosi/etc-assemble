@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# Assemble /sysroot/etc as an overlay before switch_root: the verity-baked
+# factory tree is the lower, a btrfs subvolume on data-luks holds the upper.
+# Runs in the initrd because PID 1 reads /etc/selinux/config and
+# /etc/systemd/system.conf synchronously at startup — no unit in the real
+# system could mount over /etc in time. This is myosi's equivalent of the
+# mybox preinit, except the initrd gives us the pre-PID-1 window for free.
+#
+# Layout on the state subvolume (mounted at /.myosi):
+#     /.myosi/etc         upperdir — the host's entire /etc delta
+#     /.myosi/.work/etc   workdir  — overlayfs scratch, must be a SIBLING
+#
+# Why not the subvolume root as upperdir: the kernel requires workdir and
+# upperdir to live under the same MOUNT (EINVAL otherwise) and, on btrfs,
+# in the same SUBVOLUME (or every copy-up fails EXDEV at runtime, long
+# after a clean mount). Neither may contain the other. So upper has to be
+# a child of the mounted subvolume with work as its sibling.
+#
+# No `set -e`: a half-assembled /etc must still reach the emergency shell
+# with a readable reason instead of dying silently mid-mount.
+set -uo pipefail
+
+SYSROOT="${MYOSI_SYSROOT:-/sysroot}"
+DATA_DEV="${MYOSI_DATA_DEV:-/dev/mapper/data}"
+STATE_SUBVOL="${MYOSI_STATE_SUBVOL:-state}"
+STATE_DIR="${MYOSI_STATE_DIR:-/.myosi}"
+CMDLINE="${MYOSI_CMDLINE:-/proc/cmdline}"
+POOL_TMP="${MYOSI_POOL_TMP:-/run/myosi/pool}"
+BTRFS_OPTS="defaults,noatime,compress=zstd:3"
+ETC_CTX="system_u:object_r:etc_t:s0"
+
+STATE="${SYSROOT}${STATE_DIR}"
+LOWER="${SYSROOT}/usr/share/factory/etc"
+MERGED="${SYSROOT}/etc"
+
+log() { echo "etc-assemble: $*" >&2; }
+die() { echo "etc-assemble: ERROR: $*" >&2; exit 1; }
+
+# myosi.etc=volatile -> factory-fresh /etc on a tmpfs upper, changes dropped
+# at reboot. The break-glass for a host bricked by its own /etc override;
+# the old plain-subvolume model had no equivalent.
+# myosi.etc=legacy   -> pre-overlay behaviour, mount the /etc subvolume flat.
+mode=persistent
+for word in $(cat "$CMDLINE" 2>/dev/null); do
+    case "$word" in
+        myosi.etc=*) mode="${word#myosi.etc=}" ;;
+    esac
+done
+
+[ -d "$LOWER" ]  || die "factory tree missing at $LOWER"
+[ -d "$MERGED" ] || die "$MERGED missing — the image must ship /etc as an empty mountpoint"
+
+# The state mountpoint cannot be created at runtime: the root is read-only
+# erofs. It is baked by mkosi.shared/postinst-common.sh.
+[ -d "$STATE" ] || die "$STATE missing — the image must bake the state mountpoint"
+
+ensure_state_subvol() {
+    # repart's Subvolumes= only fires at format time, so a host formatted by
+    # an older image has no /state. Create it here rather than dropping the
+    # operator into emergency with a btrfs command to type by hand.
+    mkdir -p "$POOL_TMP" || die "cannot create $POOL_TMP"
+    mount -t btrfs -o "subvol=/" "$DATA_DEV" "$POOL_TMP" \
+        || die "cannot mount the data pool top-level"
+    if [ ! -d "$POOL_TMP/$STATE_SUBVOL" ]; then
+        log "creating /$STATE_SUBVOL subvolume on $DATA_DEV"
+        btrfs subvolume create "$POOL_TMP/$STATE_SUBVOL" >/dev/null \
+            || { umount "$POOL_TMP"; die "could not create /$STATE_SUBVOL"; }
+    fi
+    umount "$POOL_TMP" || log "WARNING could not unmount $POOL_TMP"
+    rmdir "$POOL_TMP" 2>/dev/null
+}
+
+# Staged upper edits. `myosi etc-reset` / `etc-prune` cannot touch the upper
+# of a LIVE overlay — the kernel gives an incoherent view until remount —
+# so they append paths here and the change lands on the next boot, before
+# the overlay exists.
+apply_pending() {
+    local queue="$STATE/etc.pending" rel
+    [ -f "$queue" ] || return 0
+    log "applying staged /etc resets from ${STATE_DIR}/etc.pending"
+    while IFS= read -r rel; do
+        case "$rel" in
+            ''|'#'*) continue ;;
+            /*|*..*) log "WARNING skipping unsafe path: $rel"; continue ;;
+        esac
+        rm -rf -- "$STATE/etc/$rel" && log "  reset $rel" \
+            || log "  WARNING could not reset $rel"
+    done < "$queue"
+    rm -f "$queue"
+}
+
+case "$mode" in
+    legacy)
+        log "myosi.etc=legacy — mounting the /etc subvolume flat, no overlay"
+        mount -t btrfs -o "$BTRFS_OPTS,subvol=/etc" "$DATA_DEV" "$MERGED" \
+            || die "legacy /etc mount failed"
+        exit 0
+        ;;
+    volatile)
+        log "myosi.etc=volatile — tmpfs upper, every /etc change is discarded at reboot"
+        mount -t tmpfs -o mode=0755 myosi-etc-volatile "$STATE" \
+            || die "tmpfs mount for the volatile upper failed"
+        ;;
+    persistent)
+        ensure_state_subvol
+        mount -t btrfs -o "$BTRFS_OPTS,subvol=/$STATE_SUBVOL" "$DATA_DEV" "$STATE" \
+            || die "cannot mount the /$STATE_SUBVOL subvolume at $STATE"
+        ;;
+    *)
+        die "unknown myosi.etc=$mode (expected persistent, volatile or legacy)"
+        ;;
+esac
+
+mkdir -p "$STATE/etc" "$STATE/.work/etc" || die "cannot create the upper/work dirs"
+
+# Stamp etc_t BEFORE the overlay goes up. overlayfs resolves the upper's
+# context at mount time; relabelling afterwards was the first-boot race that
+# sank the earlier /var/etc attempt. `btrfs subvolume create` leaves the
+# subvolume root with no security.selinux xattr at all, and the workdir is
+# where copy-ups are staged, so all four get the label.
+for dir in "$STATE" "$STATE/etc" "$STATE/.work" "$STATE/.work/etc"; do
+    setfattr -n security.selinux -v "$ETC_CTX" "$dir" \
+        || log "WARNING could not label $dir"
+done
+
+[ "$mode" = persistent ] && apply_pending
+
+# redirect_dir=on: without it, renaming a directory that exists only in the
+# factory lower fails EXDEV, and `mv` inside /etc is something operators do.
+mount -t overlay myosi-etc -o \
+    "lowerdir=$LOWER,upperdir=$STATE/etc,workdir=$STATE/.work/etc,redirect_dir=on" \
+    "$MERGED" || die "overlay mount on $MERGED failed"
+
+# PID 1 reads this immediately after the pivot; if it is not visible the
+# emergency shell is far kinder than a frozen pid 1.
+[ -e "$MERGED/selinux/config" ] || die "assembled /etc has no selinux/config — refusing to pivot"
+
+log "assembled $MERGED (mode=$mode, upper=${STATE_DIR}/etc)"

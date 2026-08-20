@@ -18,7 +18,7 @@ OnFailure=emergency.target
 # this unit instead of the whole initrd transaction.
 After=sysroot.mount systemd-repart.service systemd-udevd.service cryptsetup-pre.target
 Wants=sysroot.mount systemd-repart.service
-Before=sysroot-etc.mount myosi-etc-seed.service initrd.target initrd-switch-root.target
+Before=myosi-etc-assemble.service initrd.target initrd-switch-root.target
 Conflicts=shutdown.target
 
 [Service]

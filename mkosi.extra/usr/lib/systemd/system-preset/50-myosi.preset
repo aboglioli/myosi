@@ -10,6 +10,7 @@
 # preset-all silently skips lines whose unit isn't in main /usr.
 
 enable myosi-sysext-relabel.service
+enable myosi-etc-manifest.service
 enable myosi-glib-schemas-compile.service
 
 # No myosi-homed-user@ instance is enabled: homed cannot rename a user later

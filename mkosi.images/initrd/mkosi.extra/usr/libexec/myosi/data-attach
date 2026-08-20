@@ -3,8 +3,8 @@
 # live /dev/mapper/data: unlock the Type=var partition on the SAME disk as
 # the booted root (guard: an external myosi USB's data-luks must not be
 # adopted), unlock data-N pool members on ANY disk (multi-disk btrfs is
-# intentional), then `btrfs device scan`. Mounts, /etc seed and SELinux
-# labeling live in separate units.
+# intentional), then `btrfs device scan`. Assembling /etc (state subvolume
+# + overlay) is myosi-etc-assemble.service's job, not this one's.
 
 set -euo pipefail
 

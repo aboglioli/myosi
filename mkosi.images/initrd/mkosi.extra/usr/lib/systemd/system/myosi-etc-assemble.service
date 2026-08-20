@@ -1,0 +1,28 @@
+[Unit]
+Description=Assemble /sysroot/etc (factory lower + persistent overlay upper)
+Documentation=https://github.com/aboglioli/myosi/blob/main/README.md
+DefaultDependencies=no
+# Dependency rationale: see myosi-data-attach.service — same rules for
+# every unit in the /etc chain. This unit replaces the old
+# sysroot-etc.mount + myosi-etc-seed.service pair: because the script
+# performs the mounts itself, no mount unit exists for the pre-pivot
+# isolate to stop, which removes that whole class of footgun.
+IgnoreOnIsolate=yes
+OnFailure=emergency.target
+After=myosi-data-attach.service
+Wants=myosi-data-attach.service
+Before=initrd.target initrd-switch-root.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Mirror to console — a failure here means pid 1 would pivot into an
+# empty /etc and freeze on the SELinux policy load, so it must be visible
+# without a journal.
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/usr/libexec/myosi/etc-assemble
+
+[Install]
+WantedBy=initrd.target initrd-switch-root.target
