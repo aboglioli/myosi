@@ -376,6 +376,47 @@ Trade-off:
   membership stays until manually pruned, which is harmless (the
   group itself is gone, no enforcement happens).
 
+### Generators run before every mount — nothing may point into `/home`
+
+systemd runs unit generators at the very start of the boot transaction:
+before `local-fs.target`, before any `.mount` unit, and long before
+`systemd-homed` has activated anybody's home. Whatever a generator reads
+must already be there — on myosi the verity root or the `/etc` subvol
+(mounted in the initrd), never `/home`, `/srv` or `/var`.
+
+The failure is silent, which is what makes it a footgun. A symlink from a
+generator input directory into a home directory does not resolve at
+generator time, and the unit it should have produced never exists:
+
+```
+quadlet-generator[1341]: error loading "/etc/containers/systemd/foo.container",
+                         open ...: no such file or directory
+```
+
+`systemctl status foo.service` then reports **`Unit foo.service could not
+be found`** — not a failed unit, no unit at all. The usual "cure" is a
+manual `daemon-reload` after login, because by then the home is mounted;
+that is the symptom, not a fix.
+
+- Install system quadlets into `/etc/containers/systemd/` as **real files**
+  (`install -m0644`), never symlinks into a tree under `/home`.
+- Same for any generator input: `.container`/`.network`/`.volume` files,
+  `/etc/systemd/system-generators`, fstab fragments.
+- No unlock mechanism changes this — TPM2 on the disk, an unlocked homed
+  home, `enable-linger`: generators precede mounting entirely. (And homed
+  has no TPM2 support; see the homed section.)
+- For *user*-scope quadlets the sibling rule already applies: keep their
+  data outside the encrypted home (`/srv/users`,
+  `/var/lib/containers/users`).
+
+Run the generator by hand to see exactly what systemd would get, including
+the `*.target.wants/` symlinks that decide whether a unit starts at boot:
+
+```bash
+sudo /usr/lib/systemd/system-generators/podman-system-generator /tmp/g /tmp/g /tmp/g
+find /tmp/g
+```
+
 ### Versioned artifact paths
 
 | Where | Convention |
@@ -849,9 +890,16 @@ line at deactivation on a record that already reports
    `passwd -l root`. See [Post-installation](#post-installation).
 4. (Optional) Operator runs `sudo loginctl enable-linger <you>`
    if they want rootless quadlets to keep running across reboots.
-   Linger is NOT enabled by default — at every boot it tries to
-   activate the homed home, which fails unattended (LUKS needs the
-   passphrase) until TPM2 enrolment.
+   Linger is NOT enabled by default, and on a LUKS-backed homed user it
+   cannot give you an unlocked home at boot. **systemd-homed has no TPM2
+   support** (no `--tpm2-device`; it offers password, PKCS#11, FIDO2 and
+   recovery key), and there is no unattended activation path —
+   `systemd-homed-activate.service` has no `ExecStart`, only
+   `ExecStop=homectl deactivate-all`. A home is activated **by
+   authentication** and locked otherwise; that is the point of homed. So a
+   lingering `user@<uid>.service` starts with no accessible `$HOME`. Keep
+   anything that must run before login out of the home — see `/srv/users`
+   and `/var/lib/containers/users` in `tmpfiles.d/myosi.conf`.
 
 **Post-install root access (fresh image state):**
 
@@ -895,13 +943,15 @@ homectl update user \
     --storage=luks \
     --disk-size=20G \
     --fs-type=btrfs                        # converts subvol → LUKS image, copies data in
-# Optional: TPM2 auto-unlock at boot
-homectl update user \
-    --tpm2-device=auto \
-    --tpm2-pcrs=7+14 \
-    --auto-login=yes
 
-loginctl enable-linger user
+# NOTE: there is no TPM2 auto-unlock for a homed home. homectl has no
+# --tpm2-device/--tpm2-pcrs (they are rejected as unrecognized options);
+# TPM2 enrolment applies to the DISK (data-luks, via systemd-cryptenroll),
+# not to a homed user's home image. The home unlocks at authentication.
+# The strongest unattended-adjacent option homed offers is --fido2-device
+# (still requires the token to be present), or --recovery-key for break-glass.
+
+loginctl enable-linger user   # only useful for user units that do NOT need $HOME
 PASSWORD=changeme homectl activate user  # use the current user password
 
 # Step 4 (optional, recommended) — re-lock root so password login goes
@@ -930,8 +980,8 @@ loginctl disable-linger user
 systemctl stop user@1000.service
 homectl deactivate user
 homectl update user --storage=luks --disk-size=20G --fs-type=btrfs
-homectl update user --tpm2-device=auto --tpm2-pcrs=7+14 --auto-login=yes
-loginctl enable-linger user
+# No TPM2 step: homectl has no --tpm2-device (see the note above).
+loginctl enable-linger user   # only useful for user units that do NOT need $HOME
 PASSWORD=changeme homectl activate user
 ```
 
@@ -951,10 +1001,10 @@ homectl unlock user                  # unlock after suspend
 **Recovery / drift / re-enrollment (LUKS backend only):**
 
 ```bash
-# TPM2 PCR changed (firmware update, secureboot key swap) → auto-unlock fails.
-# SSH in (key auth still works if provisioned), PAM falls back to passphrase
-# prompt on PTY, type passphrase, then:
-homectl update user --tpm2-device=auto --tpm2-pcrs=7+14
+# NOTE: a homed home is never TPM2-bound, so there is no PCR drift to
+# recover from here. PCR drift affects the DISK keyslot (data-luks) — see
+# "Re-enroll TPM2 after a firmware / SecureBoot / MOK change" below, which
+# uses systemd-cryptenroll and is the real tool for that.
 
 # Generate a one-time recovery key (print and store offline):
 homectl update user --recovery-key
