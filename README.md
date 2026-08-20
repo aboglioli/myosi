@@ -1,8 +1,8 @@
 # myosi
 
-Personal atomic, immutable Linux distribution built from raw mkosi + systemd primitives. Signed dm-verity erofs root, A/B sysupdate slots, signed sysexts for optional userspace features (kernel modules included), writable persistent `/etc` as a btrfs subvolume on the encrypted data-luks pool for local host identity. Fedora 44 base. No bootc, no ostree, no rpm-ostree.
+Personal atomic, immutable Linux distribution built from raw mkosi + systemd primitives. Signed dm-verity erofs root, A/B sysupdate slots, signed sysexts for optional userspace features (kernel modules included), and an `/etc` assembled at boot as an overlay — verity-baked factory defaults underneath, a btrfs subvolume on the encrypted data-luks pool holding only what this host changed. Fedora 44 base. No bootc, no ostree, no rpm-ostree.
 
-The base image is the same on every host. Hostname and local tweaks live in the persistent `/etc` btrfs subvolume on `data-luks`, seeded from the verity-baked `/usr/share/factory/etc` factory tree on first boot. Optional features (desktop, containers, virt, firmware, NVIDIA Turing+, NVIDIA Pascal/Maxwell/Volta legacy, OpenZFS) are added per host by enabling signed sysexts on top of the slim base. Every kernel module shipped in a sysext is signed with `boot.key` so it passes `module.sig_enforce=1` at load.
+The base image is the same on every host. Hostname and local tweaks live in the overlay upper at `/.myosi/etc` on `data-luks`; every path nobody touched shows through from the verity-baked `/usr/share/factory/etc` factory tree and therefore tracks the image across upgrades. Optional features (desktop, containers, virt, firmware, NVIDIA Turing+, NVIDIA Pascal/Maxwell/Volta legacy, OpenZFS) are added per host by enabling signed sysexts on top of the slim base. Every kernel module shipped in a sysext is signed with `boot.key` so it passes `module.sig_enforce=1` at load.
 
 **See the Design notes and Multi-disk storage runbook appendices below for full architecture, rationale, multi-disk patterns, and milestones.**
 
@@ -17,9 +17,9 @@ The base image is the same on every host. Hostname and local tweaks live in the 
 | Image format | OCI container | signed disk image (raw) |
 | Root integrity | composefs (fs-verity) | dm-verity over erofs (signed Merkle tree) |
 | Atomic updates | `bootc upgrade` (OCI pull) | `systemd-sysupdate` (signed artifact pull) |
-| `/etc` model | layered via ostree 3-way merge | persistent btrfs subvol on `data-luks`; seeded from verity-baked `/usr/share/factory/etc` factory tree in the initrd by `myosi-etc-seed.service` on first boot |
+| `/etc` model | layered via ostree 3-way merge | overlayfs assembled pre-pivot by `myosi-etc-assemble.service`: `lowerdir=/usr/share/factory/etc` (verity-baked), `upperdir=/.myosi/etc` (btrfs subvol on `data-luks`) |
 | Boot chain | shim → GRUB → BLS entries | shim → sd-boot → signed UKI |
-| Per-host config | host-specific image variant | persistent `/etc` btrfs subvol on `data-luks` |
+| Per-host config | host-specific image variant | the `/etc` overlay upper on `data-luks` |
 | Optional features | host-specific image variant | sysext merged into `/usr` (enabled per host) |
 | Distribution | GHCR registry | GitHub Releases (signed `.raw` files) |
 
@@ -42,9 +42,9 @@ Both will coexist for some time. `myos` continues to serve hosts. `myosi` is har
 │                       myosi-data-attach → unlock /dev/mapper/data│
 │                                            + unlock data-N pool │
 │                                            + btrfs device scan  │
-│                       data-attach seeds /etc from /usr/share/factory/etc      │
-│                                  + setfattr etc_t (first boot)  │
-│                       sysroot-etc.mount → /sysroot/etc (subvol) │
+│                       myosi-etc-assemble → mount /state at     │
+│                            /sysroot/.myosi, stamp etc_t, then   │
+│                            overlay factory + upper onto /etc    │
 │                       → switch_root                             │
 │                  └─ real root systemd:                          │
 │                       var.mount (gpt-auto from Type=var,        │
@@ -54,9 +54,9 @@ Both will coexist for some time. `myos` continues to serve hosts. `myosi` is har
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-**Why repart runs in the initrd:** `systemd-repart.service` runs after `sysroot.mount` in the initrd, reads `/usr/lib/repart.d/*.conf` from the initrd cpio image, and creates missing partitions (root-B, verity-B, verity-sig-B, data-luks) or grows the existing data partition to fill the disk. The initrd repart definitions are copied from `mkosi.extra/usr/lib/repart.d/` via `ExtraTrees=`. Running repart in the initrd ensures that `/dev/mapper/data` has full capacity, and that the `/var` + `/etc` subvolumes exist on it, before `sysroot-etc.mount` fires (in the initrd) and `var.mount` is auto-generated (in the main system) — no manual `cryptsetup resize` or `btrfs filesystem resize max` step needed on first boot.
+**Why repart runs in the initrd:** `systemd-repart.service` runs after `sysroot.mount` in the initrd, reads `/usr/lib/repart.d/*.conf` from the initrd cpio image, and creates missing partitions (root-B, verity-B, verity-sig-B, data-luks) or grows the existing data partition to fill the disk. The initrd repart definitions are copied from `mkosi.extra/usr/lib/repart.d/` via `ExtraTrees=`. Running repart in the initrd ensures that `/dev/mapper/data` has full capacity, and that the `/var` + `/state` subvolumes exist on it, before `myosi-etc-assemble.service` runs (in the initrd) and `var.mount` is auto-generated (in the main system) — no manual `cryptsetup resize` or `btrfs filesystem resize max` step needed on first boot.
 
-**Why there is no `/etc/fstab` or `/etc/crypttab`:** The sealed erofs `/etc` is wiped after its factory contents are snapshotted to `/usr/share/factory/etc` (the factory tree `myosi-etc-seed.service` copies into the empty `/etc` subvol on first boot, between `sysroot-etc.mount` and pivot). Static crypttab/fstab would be wrong for multi-disk hosts (global PARTLABEL selection races with attached myosi disks) and cannot handle the `data-N` pool members. The initrd `myosi-data-attach` service discovers and unlocks the primary data partition + any `data-N` pool members directly; `sysroot-etc.mount` mounts the `/etc` subvol before pivot; explicit `var.mount`, `home.mount`, and `srv.mount` units mount the sibling subvols in the main system (each with `BindsTo=dev-mapper-data.device`, `Options=defaults,noatime,compress=zstd:3,subvol=/<name>`).
+**Why there is no `/etc/fstab` or `/etc/crypttab`:** The sealed erofs `/etc` is wiped after its factory contents are snapshotted to `/usr/share/factory/etc`, leaving an empty directory for `myosi-etc-assemble.service` to mount the overlay onto. Static crypttab/fstab would be wrong for multi-disk hosts (global PARTLABEL selection races with attached myosi disks) and cannot handle the `data-N` pool members. The initrd `myosi-data-attach` service discovers and unlocks the primary data partition + any `data-N` pool members directly; `myosi-etc-assemble` assembles `/etc` before pivot; explicit `var.mount`, `home.mount`, and `srv.mount` units mount the sibling subvols in the main system (each with `BindsTo=dev-mapper-data.device`, `Options=defaults,noatime,compress=zstd:3,subvol=/<name>`).
 
 **Partition layout (target disk after install — total ~12 GiB minimum):**
 ```
@@ -114,7 +114,7 @@ myosi/
 │   ├── nvidia-build.sh      # NVIDIA-specific: rpmbuild kmod, sign with boot.key, modprobe.d
 │   └── zfs-build.sh         # OpenZFS-specific: tarball → SRPM → rpmbuild → sign
 ├── mkosi.extra/             # files copied verbatim into the image
-│   ├── etc/                 # /etc baseline (shadow, subuid, sshd_config.d, etc.)
+│   ├── etc/                 # /etc baseline -> snapshotted to /usr/share/factory/etc (the overlay lower)
 │   └── usr/                 # /usr baseline (sysctl.d, udev rules, sysupdate, libexec, ...)
 ├── mkosi.repart/            # build-time partition defs (4: ESP + root-A + verity-A + verity-sig-A) — mkosi auto-discovers
 ├── mkosi.extra/usr/lib/repart.d/ # runtime/first-boot expansion layout (8 partitions: build set + root-B + verity-B + verity-sig-B + data-luks)
@@ -145,8 +145,11 @@ files referenced; this is the operator/contributor map.
 | `/usr/share/myosi/` | All myosi-shipped data: signing keys, version metadata, baseline sysext images, baked SSH keys (if provided). Verity-immutable. | Image-coupled. Changes atomically with each image upgrade. |
 | `/usr/share/myosi/extensions/` | Baseline sysext `.raw` files that ship inside the image (none currently; infrastructure kept for future baselines). NOT a path systemd-sysext discovers from — see below. | Image-coupled. |
 | `/usr/lib/extensions/` | Documented by systemd as a sysext location but in practice systemd-sysext does NOT scan it for discovery on F44 / systemd 259. Do not bake new sysexts here. | (avoid) |
-| `/etc` | Persistent btrfs subvolume on `data-luks` (`/dev/mapper/data` `subvol=/etc`). Seeded from the verity-baked `/usr/share/factory/etc` factory tree on first boot by `myosi-etc-seed.service` (initrd; `cp -a --reflink=auto /sysroot/usr/share/factory/etc/. /sysroot/etc/` + `setfattr etc_t /sysroot/etc`). Every write lands directly in the subvol and persists across image upgrades. | Operator-mutable. |
-| `/usr/share/factory/etc/` | The verity-baked factory `/etc` tree. `mkosi.finalize` snapshots the build-settled `/etc` here then wipes the sealed-root `/etc` mountpoint. Read by `myosi-etc-seed.service` only on first boot — once the subvol is populated, new files added to `/usr/share/factory/etc` in later images are NOT auto-merged into `/etc` (operator owns `/etc` after first boot, bootc/ostree-style). Use `diff -ruN /etc /usr/share/factory/etc` to spot drift after upgrades. | Image-coupled. |
+| `/etc` | overlayfs, assembled pre-pivot by `myosi-etc-assemble.service`. Not a stored filesystem — it is the union of the two rows below. | Operator-mutable. |
+| `/usr/share/factory/etc/` | **The overlay lower.** The verity-baked factory `/etc` tree; `mkosi.finalize` snapshots the build-settled `/etc` here then wipes the sealed-root `/etc` mountpoint. Rotates atomically with the image, so any path this host has not touched follows the image across upgrades. | Image-coupled. |
+| `/.myosi/etc` | **The overlay upper** — btrfs `subvol=/state` on `data-luks`, mounted at `/.myosi`. Contains exactly what this host changed: modified files, host-only files, and 0:0 character devices where a factory file was deleted. `myosi etc-list` reads it. | Operator-mutable. |
+| `/.myosi/.work/etc` | overlayfs workdir. Must be a sibling of the upper inside the same subvolume — see the `/etc` overlay section for the kernel rules that force this. | Internal. |
+| `/.myosi/etc.pending` | Paths queued by `myosi etc-reset` / `etc-prune`, applied by `etc-assemble` on the next boot. The upper of a live overlay cannot be edited safely. | Selector-managed. |
 | `/var/lib/myosi/extensions/` | Versioned sysext store, filled by sysupdate (`InstancesMax=2`: current + previous generation). NOT a sysext discovery path. | sysupdate-managed. |
 | `/var/lib/extensions/` | The discovery path systemd-sysext actually scans. `sysext-select` links exactly ONE version per sysext here (from the store or the baked baselines) — the one matching the booted `IMAGE_VERSION`. Operator-dropped regular files override selection for their sysext name. | Selector-managed + operator-mutable. |
 | `/etc/extensions/`, `/run/extensions/` | Additional sysext discovery paths (rare). | Operator-mutable. |
@@ -223,52 +226,85 @@ followed by a working `modprobe nvidia_drm` at the shell seconds
 later — same kernel, same overlay, same indices. Loading from the
 same shell that just finished `depmod` is race-free.
 
-### The /etc factory-seed footgun
+### The /etc overlay
 
-`/etc` is a persistent btrfs subvolume on `data-luks`. On first boot
-`myosi-etc-seed.service` (initrd) copies the verity-baked `/usr/share/factory/etc/`
-factory tree into the empty subvol. On every subsequent boot the
-unit's `ConditionDirectoryNotEmpty=!/sysroot/etc` gate is FALSE
-(subvol is non-empty) → unit is skipped. The seed is genuinely
-one-shot — image upgrades do NOT re-merge new factory files.
+`/etc` is not stored anywhere. It is assembled before the pivot by
+`myosi-etc-assemble.service` (initrd) from two layers:
 
-What this means at image upgrade time:
+```
+lowerdir  /usr/share/factory/etc      verity-baked, rotates with the image
+upperdir  /.myosi/etc                 btrfs subvol=/state on data-luks
+workdir   /.myosi/.work/etc           sibling of the upper, same subvolume
+```
 
-- Operator-modified `/etc` files are preserved across image upgrades
-  (the subvol survives image swaps untouched).
-- New files added to `/usr/share/factory/etc/` in the new image are **NOT** auto-
-  copied into `/etc`. Operator owns `/etc` after first boot — same
-  semantics as bootc / ostree atomic distros. Run
-  `diff -ruN /etc /usr/share/factory/etc` after an upgrade to spot files you might
-  want to pull in by hand.
-- Files removed from `/usr/share/factory/etc/` in the new image LEAVE their copy in
-  `/etc` behind. If the old name now means something else (logical
-  rename, format change), the stale copy is on the operator to clear.
+The consequence that matters: **a path nobody touched on this host keeps
+following the image.** New factory files appear on upgrade, changed
+defaults apply, removed files disappear. A path this host *has* touched
+is copied up into the upper and stays yours until you say otherwise. The
+upper is therefore the complete, exact answer to "what did I change
+here" — `myosi etc-list` is instant and cannot drift, because it reads
+the thing the kernel is actually layering.
 
-Concrete bite (carried over from the retired overlay model): an old
-image baked the fleet-keys sysext under `/usr/share/factory/etc/extensions/`. After
-upgrading to a newer image that no longer bakes there, the stale
-`.07` raw is still resident at `/etc/extensions/` — `sysext-select`
-prevents it from re-merging via `/var/lib/extensions/`, but a manual
-`rm -rf /etc/extensions/*.raw` clears the file itself.
+**Why the initrd.** PID 1 reads `/etc/selinux/config` and
+`/etc/systemd/system.conf` synchronously at startup, so no unit in the
+real system can mount over `/etc` in time. myosi's two-stage boot already
+provides a pre-PID-1 window; the sibling `mybox` project has to ship a
+PID 1 `preinit` shim for exactly this reason.
 
-Rules of thumb:
+**Why `/state` and not the `/etc` subvolume as upperdir.** Two kernel
+rules, both load-bearing:
 
-- Never bake versioned content under `/usr/share/factory/etc/` if image upgrades
-  ship different versions of the same logical file. Use
-  `/usr/share/myosi/` or `/usr/lib/` instead — those paths sit under
-  verity-erofs with no operator-mutable copy above them, so image
-  upgrade rotates the content atomically.
-- `confext` (a separate `/etc` overlay backed by image-shipped raws)
-  is **dormant by default** on myosi — `systemd-confext.service` is
-  not masked, not preset-enabled. Stock myosi prefers the persistent
-  `/etc` subvol + sysexts for `/usr`-extending content + portable
-  services for self-contained services with their own `/etc`
-  namespace. Operators who later want confext can
-  `systemctl enable --now systemd-confext.service` without fighting
-  a hard mask. Reconciliation rules between the persistent `/etc`
-  and a confext overlay would need a design pass first (deny order,
-  copy-up behavior, sysupdate phase handoff).
+1. `workdir` and `upperdir` must live under the **same mount**, or
+   `mount(2)` returns `EINVAL`.
+2. On btrfs they must live in the **same subvolume**. Different
+   subvolumes under one mount pass the mount check and then fail *every
+   copy-up* with `EXDEV` — a clean mount that breaks at the first write
+   to a factory file, which is the worst possible failure shape.
+
+Neither may contain the other. So the mounted subvolume's root cannot be
+the upperdir: the upper has to be a child with the workdir as its
+sibling. `/state` mounts at `/.myosi`, giving `/.myosi/etc` (upper) and
+`/.myosi/.work/etc` (work). `/.myosi` is a dot-prefixed mountpoint baked
+into the sealed image by `postinst-common.sh` — the runtime root is
+read-only erofs, so it cannot be created at boot.
+
+**Why this is not the overlay that was retired.** The earlier attempt put
+the upper at `/var/etc`, which forced `/var` to mount before `/etc`
+(impossible — `var.mount` is read from `/etc`), left PID 1 holding the
+overlay open so `var.mount` logged FAILED at shutdown, and cached the
+upper's SELinux context before the first-boot relabel could fix it. The
+current shape avoids all three: `/var` is not involved; neither the
+`/.myosi` mount nor the `/etc` overlay is owned by a unit in the real
+system (both are adopted from `/proc/self/mountinfo`, exactly as `/etc`
+already was), so systemd never tries to stop them and `systemd-shutdown`
+handles them in its final pass; and `etc_t` is stamped on the subvolume
+root, the upper, and the workdir *before* the overlay is mounted, with no
+first-boot relabel in the picture at all.
+
+**Escape hatches** (kernel cmdline, parsed by `etc-assemble`):
+
+| | |
+|---|---|
+| `myosi.etc=volatile` | tmpfs upper. `/etc` comes up as pure factory and every change is discarded at reboot. Recovers a host bricked by its own `/etc` override without a USB stick — the plain-subvolume model had no equivalent. |
+| `myosi.etc=legacy` | mount `subvol=/etc` flat, no overlay. Pre-overlay behaviour, for hosts mid-migration. |
+
+**Sharp edges that remain:**
+
+- Copy-up is per-file and permanent until reset. A daemon that rewrites a
+  factory file for its own reasons pins that file's content. `myosi
+  etc-prune` drops upper entries that are byte-identical to the factory
+  again; `myosi etc-drift` reports upper entries whose factory
+  counterpart changed in the last image upgrade.
+- Deleting a factory file leaves a whiteout, and `rm -rf` on a factory
+  directory sets `trusted.overlay.opaque` — the whole factory subtree
+  stays hidden even if the image later adds files to it.
+- **The upper of a mounted overlay must not be edited.** The kernel keeps
+  serving stale content until the mount is re-established, and only the
+  initrd can re-establish `/etc`. This is why `etc-reset` and `etc-prune`
+  queue paths into `/.myosi/etc.pending` instead of touching the upper.
+- `confext` is still dormant, and now overlaps more directly: a confext
+  layer would stack its own overlay over this one and shadow operator
+  writes. Reconciling the two still needs a design pass.
 
 ### Boot path summary
 
@@ -276,13 +312,16 @@ Rules of thumb:
 firmware → shim → systemd-boot → UKI (signed; kernel + initrd + cmdline + os-release)
    initrd: systemd-veritysetup → mount root RO
            systemd-repart → create missing partitions + grow data-luks to fill disk
-                          + create /etc and /var subvolumes inside data-luks btrfs
+                          + create /var and /state subvolumes inside data-luks btrfs
            myosi-data-attach → find Type=var on same disk as root, unlock as /dev/mapper/data
                               + unlock any data-N pool members from any disk
                               + btrfs device scan to register all pool members
-           sysroot-etc.mount → /sysroot/etc (btrfs subvol=/etc; NOT an overlay)
-           myosi-etc-seed → cp -a /sysroot/usr/share/factory/etc/. /sysroot/etc/ + setfattr etc_t
-                            (first boot only; ConditionDirectoryNotEmpty=!/sysroot/etc)
+           myosi-etc-assemble → create /state subvol if absent
+                              + mount subvol=/state at /sysroot/.myosi
+                              + mkdir etc/ and .work/etc/, stamp both etc_t
+                              + apply any staged resets from etc.pending
+                              + mount -t overlay lower=factory upper=/.myosi/etc
+                                work=/.myosi/.work/etc onto /sysroot/etc
            → switch_root
    real root: var.mount + home.mount + srv.mount (explicit units, all
                 BindsTo=dev-mapper-data.device, Before=local-fs.target)
@@ -552,14 +591,16 @@ fix in this development cycle. Quick index:
   pitfall — operators on long-lived hosts may need to
   `rm -rf /etc/extensions/*.raw` once after upgrading past that
   change.
-- The `/etc` overlay (lowerdir=`/usr/share/factory/etc`, upperdir=`/var/etc`) was
-  retired in favor of a real persistent btrfs subvol seeded from
-  `/usr/share/factory/etc` via `myosi-etc-seed.service`. This fixed three issues at once: the
-  `var.mount FAILED unmount at shutdown` line (PID 1 was holding the
-  overlay open on `/var/etc`), the SELinux first-boot upperdir-context
-  caching race, and the initrd-side `setfattr` pre-seed for the
-  overlay upperdir. The `myosi-firstboot-relabel.service` first-boot
-  oneshot was retired along with it.
+- `/etc` is an overlay again, but with the upper on its own `/state`
+  subvolume mounted at `/.myosi` instead of at `/var/etc`. The three
+  problems that killed the first attempt were all properties of the
+  `/var` location, not of overlayfs: `/var` cannot mount before `/etc`,
+  PID 1 pinned `var.mount` open at shutdown, and the upper's SELinux
+  context was cached before the first-boot relabel. The current shape
+  keeps `/var` out of the boot path, leaves both mounts unowned by any
+  unit in the real system, and stamps `etc_t` before mounting. The
+  plain-subvolume model it replaces froze `/etc` at first boot, which is
+  how this fleet ended up without `/etc/myosi/users/`.
 - `nvidia_drm` was silently absent at boot until kernel-module
   loading was pulled into the same shell process that runs
   `depmod -a`.
@@ -601,9 +642,9 @@ sudo just install /dev/nvme0n1   # writes the same image to the internal disk
 
 First boot of the installed system runs:
 
-- `systemd-repart` in the initrd creates and grows `data-luks` to fill the disk, formats it as LUKS2 + btrfs, creates `/var`, `/etc`, `/home`, and `/srv` subvolumes (`FactoryReset=yes` + `Encrypt=key-file`)
-- `myosi-data-attach.service` unlocks `/dev/mapper/data` (key-file first, then TPM2/passphrase fallback) + unlocks present `data-N` pool members + runs `btrfs device scan`. It does **not** mount or seed anything — `sysroot-etc.mount` mounts the `/etc` subvol, and `myosi-etc-seed.service` seeds it from `/sysroot/usr/share/factory/etc` + stamps `etc_t` on the subvol root
-- `sysroot-etc.mount` mounts the `/etc` subvolume before pivot (`/var`, `/home`, `/srv` mount post-pivot via the explicit `var.mount`, `home.mount`, `srv.mount` units — not gpt-auto)
+- `systemd-repart` in the initrd creates and grows `data-luks` to fill the disk, formats it as LUKS2 + btrfs, creates `/var`, `/state`, `/home`, and `/srv` subvolumes (`FactoryReset=yes` + `Encrypt=key-file`)
+- `myosi-data-attach.service` unlocks `/dev/mapper/data` (key-file first, then TPM2/passphrase fallback) + unlocks present `data-N` pool members + runs `btrfs device scan`. It does **not** mount anything — assembling `/etc` is `myosi-etc-assemble.service`'s job
+- `myosi-etc-assemble.service` mounts `/state` at `/sysroot/.myosi` and overlays the factory tree with it onto `/sysroot/etc`, all before pivot (`/var`, `/home`, `/srv` mount post-pivot via the explicit `var.mount`, `home.mount`, `srv.mount` units — not gpt-auto). On a fresh host the upper is empty, so `/etc` **is** the factory tree — there is no first-boot seeding step
 - `systemd-firstboot` (locale/timezone/etc pre-baked, no-op)
 
 **No interactive user is created.** The image ships none on purpose — see
@@ -1077,7 +1118,7 @@ model.
 No manual resize step is needed. The initrd boot chain handles disk growth end-to-end:
 
 1. `systemd-repart.service` runs after `sysroot.mount`, reads `/usr/lib/repart.d/*.conf` from the initrd, creates the `data-luks` partition (or grows it to fill the disk on subsequent boots), formats it as LUKS2 + btrfs, and creates `/var`, `/etc`, `/home`, and `/srv` subvolumes.
-2. `myosi-data-attach.service` unlocks `/dev/mapper/data` and any present `data-N` pool members, runs `btrfs device scan`, and prepares the `/etc` subvol (seed + label). `sysroot-etc.mount` mounts `/etc` before pivot (and that mount is inherited across `switch_root` — `/etc` is the one data subvol with no unit in the main system); the explicit `var.mount` / `home.mount` / `srv.mount` units mount the siblings post-pivot. btrfs sees the full grown mapper size immediately.
+2. `myosi-data-attach.service` unlocks `/dev/mapper/data` and any present `data-N` pool members and runs `btrfs device scan`. `myosi-etc-assemble.service` then mounts `subvol=/state` at `/sysroot/.myosi` and overlays it with the factory tree onto `/sysroot/etc`, before pivot (both mounts are inherited across `switch_root` — they are the data mounts with no unit in the main system); the explicit `var.mount` / `home.mount` / `srv.mount` units mount the siblings post-pivot. btrfs sees the full grown mapper size immediately.
 3. Re-partition and growth on subsequent boots is automatic: repart grows the GPT partition before unlock, the mapper opens at the current partition size, and filesystem growth stays in the repart/grow path — not in `myosi-data-attach`.
 
 Sanity-check after the first boot if you like:
@@ -1374,9 +1415,9 @@ The primary `data-luks` partition is not selected globally by label. In the init
 2. Unlocks it as `/dev/mapper/data` — tries the embedded key-file first (`/usr/share/myosi/keys/data.key`), falls through to `systemd-cryptsetup attach ... tpm2-device=auto,discard` for TPM2/passphrase.
 3. Scans **every** disk for LUKS containers with `data-[0-9]+` labels and unlocks them as pool members (multi-disk hosts: secondary disks contribute their `data-N` containers regardless of which disk they sit on).
 4. Runs `btrfs device scan` so the kernel knows about every multi-device pool member.
-The helper stops there — it mounts nothing. Preparing the `/etc` subvol is split into two later units in the same pre-pivot chain: `sysroot-etc.mount` mounts it, then `myosi-etc-seed.service` seeds it from `/sysroot/usr/share/factory/etc` if empty (`ConditionDirectoryNotEmpty=!/sysroot/etc`) and stamps `etc_t` on its root inode. Both carry `OnFailure=emergency.target`, so an upgrade host missing the `/etc` subvol drops to the initrd emergency shell rather than pivoting broken.
+The helper stops there — it mounts nothing. Assembling `/etc` is `myosi-etc-assemble.service`'s job in the same pre-pivot chain: it creates the `/state` subvolume if the host was formatted before it existed, mounts it at `/sysroot/.myosi`, stamps `etc_t` on the subvolume root, the upper and the workdir, applies any staged resets, and mounts the overlay. It carries `OnFailure=emergency.target` and refuses to pivot if the assembled `/etc` has no `selinux/config`, so a broken assembly reaches the initrd emergency shell instead of freezing PID 1.
 
-`sysroot-etc.mount` then mounts `/dev/mapper/data` with `subvol=/etc` at `/sysroot/etc` before pivot; that mount is inherited across `switch_root`, which is why there is no `etc.mount` unit in the main system (`systemctl status etc.mount` shows it `Loaded: loaded (/proc/self/mountinfo)`). `/var` is NOT mounted in the initrd — the shipped `var.mount` unit mounts it post-pivot, same lifecycle as `home.mount` and `srv.mount`. These are explicit units, **not** gpt-auto output: `systemd-gpt-auto-generator` is unreliable on verity-protected installs (systemd 259), so myosi owns every post-pivot mount and pins `Options=` itself (a gpt-auto `var.mount` would use btrfs defaults and lose `compress=zstd:3` + `noatime`). On a running host `ls /run/systemd/generator/*.mount` is empty — confirmation that nothing is auto-generated.
+Both mounts it makes are inherited across `switch_root`, which is why there is no `etc.mount` unit in the main system (`systemctl status etc.mount` shows it `Loaded: loaded (/proc/self/mountinfo)`). Doing the mounting in a script rather than in `.mount` units is deliberate: a mount with no unit behind it cannot be stopped by the pre-pivot isolate at all, which retires the `IgnoreOnIsolate=` hazard the old `sysroot-etc.mount` had to defend against. `/var` is NOT mounted in the initrd — the shipped `var.mount` unit mounts it post-pivot, same lifecycle as `home.mount` and `srv.mount`. These are explicit units, **not** gpt-auto output: `systemd-gpt-auto-generator` is unreliable on verity-protected installs (systemd 259), so myosi owns every post-pivot mount and pins `Options=` itself (a gpt-auto `var.mount` would use btrfs defaults and lose `compress=zstd:3` + `noatime`). On a running host `ls /run/systemd/generator/*.mount` is empty — confirmation that nothing is auto-generated.
 
 There is no sealed-root `/etc/crypttab`, no pre-declared slot list, and no runtime udev/template service for `data-N`. Any `data-N` device that gates `/var` must be present during initrd boot so `myosi-data-attach` can unlock it before the btrfs mount. Post-switch hotplug of unrelated encrypted disks belongs in operator-managed `/etc/crypttab` (persistent on the `/etc` subvol) or explicit units, because those disks do not gate the `/var` or `/etc` subvolumes that the boot path requires.
 
@@ -1600,154 +1641,115 @@ sudo myosi status                               # verify features + selection
 Leave any raw you deliberately hand-manage in `/var/lib/extensions/` —
 that is exactly the operator-override case the selector respects.
 
-**SELinux policy refresh (same upgrade, and after any future image that
-changes policy):** the loaded policy lives at
-`/etc/selinux/targeted/policy/` — frozen at first boot like the rest of
-`/etc`, so image-baked policy changes (e.g. the `myosi.cil` module that
+**SELinux policy refresh:** no longer a manual step. The loaded policy at
+`/etc/selinux/targeted/policy/` comes from the factory tree through the
+overlay, so image-baked policy changes (e.g. the `myosi.cil` module that
 lets `systemd-bless-boot` rename UKIs on the ESP — without it every
-sysupdate-installed UKI stays unblessed and sd-boot rolls back) do NOT
-reach existing hosts automatically. Pull the new factory policy in and
-reboot:
-
-```bash
-sudo cp -a /usr/share/factory/etc/selinux/targeted/policy/. /etc/selinux/targeted/policy/
-sudo load_policy    # live reload — verified; a reboot works too
-```
-
-Note this is a general property of the operator-owned-/etc model:
-Fedora `selinux-policy` updates in new images also need this step.
-Runtime `semodule` operations are unsupported on deployed hosts (the
-module store is not shipped); policy changes ship as images.
+sysupdate-installed UKI stays unblessed and sd-boot rolls back) and
+Fedora `selinux-policy` updates arrive with the image. Confirm nothing
+local is shadowing it with `myosi etc-list selinux`. Runtime `semodule`
+operations remain unsupported on deployed hosts (the module store is not
+shipped); policy changes ship as images.
 
 ---
 
-## Upgrading an existing host to the /etc-subvol model (one-time)
+## Migrating an existing host to the /etc overlay
 
-Existing hosts have a `data-luks` btrfs formatted under the old overlay model: `/var`, `/home`, `/srv` subvolumes exist; `/etc` does NOT exist as a subvolume; operator-written `/etc` state lives in the overlay upperdir at `/var/etc/`. `systemd-repart`'s `Subvolumes=/etc` only fires at format time, so the new image will NOT auto-create the subvol — the initrd drops to emergency with `data-attach: /etc subvol missing on /dev/mapper/data`.
+**Not yet implemented — do not upgrade a live host across this change.**
 
-There is no in-image migration shim. From the booted old image (overlay still active), one command and a reboot:
+`etc-assemble` has no migration step. A host formatted under the
+plain-subvolume model still has its `/etc` subvolume full of config, but
+the new boot path never looks at it: it creates `/state`, finds an empty
+upper, and assembles `/etc` as the bare factory tree. The host boots, but
+comes up amnesiac — factory hostname, no ssh host keys, no
+NetworkManager connections, a fresh machine-id.
 
-```bash
-sudo mount -t btrfs -o subvol=/,noatime /dev/mapper/data /mnt
-sudo btrfs subvolume create /mnt/etc
-sudo umount /mnt
-sudo reboot
-```
+`myosi.etc=legacy` on the kernel cmdline restores the old behaviour
+(mount `subvol=/etc` flat, no overlay), so a host that boots the new
+image before migration is recoverable from the sd-boot menu.
 
-`subvol=/` mounts the btrfs top-level (sibling space for `/var`, `/etc`, `/home`, `/srv`). `subvolid=5` is the numeric equivalent. The running `/var` mount only exposes the `/var` subvolume's contents — sibling subvolumes are invisible from there, so a separate top-level mount is unavoidable.
-
-The new boot:
-
-1. `myosi-data-attach` finds the now-existing `/etc` subvol, `setfattr`s `etc_t` on its root inode, and continues.
-2. `sysroot-etc.mount` mounts the (empty) `/etc` subvol at `/sysroot/etc`.
-3. `myosi-etc-seed.service` (initrd) runs `cp -a --reflink=auto /sysroot/usr/share/factory/etc/. /sysroot/etc/` and `setfattr etc_t /sysroot/etc` — `ConditionDirectoryNotEmpty=!/sysroot/etc` gates first-boot-only.
-4. The system boots clean with factory defaults.
-
-The old operator state still sits at `/var/etc/` as a plain directory inside the `/var` subvol (the overlay is gone — it's just a regular tree now). Restore your customizations selectively:
-
-```bash
-# Spot-check what was operator-modified:
-sudo diff -ruN /etc /var/etc | less
-
-# Copy specific files back as needed, e.g.:
-sudo cp -a /var/etc/hostname /etc/hostname
-sudo cp -a /var/etc/NetworkManager /etc/
-sudo cp -a /var/etc/ssh/ssh_host_* /etc/ssh/
-# … etc, whatever you actually customised
-
-# When done, reclaim the space:
-sudo rm -rf /var/etc /var/.etc-work
-sudo restorecon -RF /etc        # belt-and-suspenders SELinux re-label
-```
-
-If the new boot fails for any reason, the OLD image is still bootable from the inactive A/B slot: at the sd-boot menu press Space and select the previous UKI. The old image's initrd ignores the new `/etc` subvol entirely.
-
-**Fresh installs need none of this** — `systemd-repart` runs at format time, `Subvolumes=/etc` in `90-data.conf` creates the subvol, `myosi-etc-seed.service` (initrd) copies `/sysroot/usr/share/factory/etc/.` into the empty subvol on first boot.
+The migration shape is settled and validated in a scratch pool, it just
+has no runbook yet: copy the old `/etc` subvolume into `/.myosi/etc`,
+then `myosi etc-prune apply` and reboot. Pruning is what makes it
+worthwhile — in a simulation seeded with this host's real factory tree, a
+574-file upper collapsed to the 2 files actually changed locally, with
+`/etc` still complete at 574 files because everything else showed through
+from the image again.
 
 ---
 
-## Reconciling `/etc` with the factory `/usr/share/factory/etc`
+## Operating the `/etc` overlay
 
-After the first boot, **the operator owns `/etc`** — bootc / ostree / Fedora Atomic semantics. The initrd `myosi-etc-seed.service` only fires on a fully empty `/etc` subvol (`ConditionDirectoryNotEmpty=!/sysroot/etc`). On every subsequent boot the unit is skipped, so:
-
-- Files the operator modified persist untouched across image upgrades.
-- New files added to `/usr/share/factory/etc/` in a later image are **NOT** auto-copied into `/etc`.
-- Files removed from `/usr/share/factory/etc/` in a later image leave a stale copy in `/etc/`.
-
-Reconciliation is manual + selective. The pattern is: **inspect the diff, copy what matters, leave the rest.**
-
-### Inspect the drift
-
-The factory tree on the running host is at `/usr/share/factory/etc/` (verity-baked, swaps atomically with each image upgrade). The live tree is at `/etc/` (persistent subvol on `data-luks`). Three commands, increasing detail:
+`/etc` is the union of the factory tree (`/usr/share/factory/etc`, from
+the image) and this host's changes (`/.myosi/etc`). The upper is the
+complete record of local drift, so these commands read it directly
+instead of diffing two trees:
 
 ```bash
-# 1. What paths differ at all? Summary only, no content.
-diff -rq /usr/share/factory/etc /etc | sort | less
-
-# 2. Per-file stat (lines added/removed). Modern, colorized.
-git diff --no-index --stat /usr/share/factory/etc /etc | less
-
-# 3. Full unified diff with colors. Pipe to delta if installed.
-git diff --no-index /usr/share/factory/etc /etc | less -R
-git diff --no-index /usr/share/factory/etc /etc | delta            # alt
+myosi etc-status          # mode, layer sizes, how much this host has changed
+myosi etc-list            # every path this host modified or deleted
+myosi etc-list ssh        # filtered
+myosi etc-diff            # content diff of /etc against the factory defaults
+myosi etc-diff hostname   # one path
 ```
 
-`git diff --no-index` works on any two paths, no repo needed. If you have `delta` configured as `core.pager`, the output is colorized + side-by-side. Without it, `less -R` honors the ANSI colors git emits.
+`etc-list` marks deletions explicitly — removing a factory file leaves an
+overlayfs whiteout in the upper, and it will keep hiding that path even
+if a later image reintroduces it.
 
-For just paths-that-differ without content:
+### After an image upgrade
+
+The question worth asking is not "what differs from factory" (your own
+edits, mostly) but "what did the *image* change that my edits are now
+hiding". `myosi-etc-manifest.service` records a checksum manifest of the
+factory tree once per `IMAGE_VERSION`, keeping the current and previous
+generation, because after a sysupdate the old factory tree is gone — it
+lives in the other A/B slot's `/usr`.
 
 ```bash
-diff -rq /usr/share/factory/etc /etc | awk '
-    /^Only in \/usr\/etc/ { print "FACTORY-ONLY:", $0 }
-    /^Only in \/etc/      { print "OPERATOR-ONLY:", $0 }
-    /differ$/             { print "MODIFIED:    ", $3 }
-'
+myosi etc-drift
+# comparing 2026.08.18.01 -> 2026.09.02.01
+#   SHADOWED  ssh/sshd_config.d/50-myosi.conf  (the image changed it; your override wins)
 ```
 
-For a file-list-only comparison (ignore content):
+Then decide per path: keep the override, or give it back to the image.
+
+### Giving a path back to the image
 
 ```bash
-comm -23 <(cd /usr/share/factory/etc && find . | sort) <(cd /etc && find . | sort)   # factory-only
-comm -13 <(cd /usr/share/factory/etc && find . | sort) <(cd /etc && find . | sort)   # operator-only
-comm -12 <(cd /usr/share/factory/etc && find . | sort) <(cd /etc && find . | sort)   # in both
+myosi etc-reset ssh/sshd_config.d/50-myosi.conf   # queue one path
+myosi etc-prune                                   # what is redundant? (dry run)
+myosi etc-prune apply                             # queue all of it
+myosi etc-pending                                 # review the queue
+myosi etc-pending clear                           # discard it
 ```
 
-### Apply selectively
+`etc-prune` finds two kinds of dead weight: upper files that are now
+byte-identical to the factory version (the override no longer overrides
+anything), and whiteouts for files the image no longer ships (nothing
+left to hide). Both stop the path from tracking the image for no benefit.
 
-```bash
-# Pull in a new factory default (operator decides per file):
-sudo cp -a /usr/share/factory/etc/<path> /etc/<path>
+**These queue rather than act.** The upper of a mounted overlay must not
+be edited — the kernel keeps serving stale content until the mount is
+re-established, and only the initrd can re-establish `/etc`. The paths
+land in `/.myosi/etc.pending` and `etc-assemble` applies them on the next
+boot, before the overlay exists, then deletes the queue.
 
-# Restore a specific factory default after a bad operator edit:
-sudo cp -a /usr/share/factory/etc/<file> /etc/<file>
+### Recovery
 
-# Reset a subtree:
-sudo rm -rf /etc/<subdir>
-sudo cp -a /usr/share/factory/etc/<subdir> /etc/<subdir>
+| Situation | Move |
+|---|---|
+| One file broken | `myosi etc-reset <path>` and reboot |
+| `/etc` broken enough that the host won't boot | add `myosi.etc=volatile` at the sd-boot menu — `/etc` comes up as pure factory, the upper is untouched and still there to fix |
+| Want the pre-overlay layout back | `myosi.etc=legacy` |
 
-# After bulk changes:
-sudo restorecon -RF /etc      # belt-and-suspenders SELinux re-label
-sudo systemctl daemon-reload  # if you touched unit-related dirs
-```
-
-Conventions:
-- Use `cp -a` (preserve mode/owner/timestamps/xattrs including SELinux labels). `cp -p` skips xattrs and breaks SELinux.
-- Use `--reflink=auto` if you want btrfs to share the underlying blocks with the source (cheap on btrfs; falls through to a real copy on non-btrfs).
-- Don't use `rsync --delete` to "sync" `/etc` from `/usr/share/factory/etc` — it would erase operator state. The point of the subvol model is that `/etc` is yours.
-
-### When to do this
-
-- After every image upgrade you care about. Default cadence: spot-check at every release window.
-- Whenever a behavior changes unexpectedly post-upgrade — first place to look is whether `/usr/share/factory/etc/<thing>` changed but `/etc/<thing>` is still the old version.
-- After enabling a sysext that ships `/usr/share/factory/etc/` entries (rare; most sysexts stay under `/usr/lib/` and `/usr/share/`).
-
-Reusable aliases (drop into `~/.bashrc` or fish `config.fish` — NOT shipped in the image):
-
-```bash
-alias etcdiff='git diff --no-index /usr/share/factory/etc /etc'
-alias etcstat='git diff --no-index --stat /usr/share/factory/etc /etc'
-alias etconly='diff -rq /usr/share/factory/etc /etc | grep "^Only in" | sort'
-```
+Note that `restorecon -RF /etc` is safe but pointless on a fresh overlay:
+the factory tree is already labelled as `/etc` at build time via the
+`file_contexts.subs` alias, so a full forced relabel rewrites nothing and
+copies nothing up. `myosi-sysext-relabel.service` still runs it because
+files *created* at runtime (ssh host keys land as `etc_t`, not
+`sshd_key_t`) do need it — and since those files are already in the
+upper, relabelling them causes no copy-up either.
 
 ---
 
@@ -1941,8 +1943,8 @@ Only `/var`, `/home`, and persistent `/etc` are unique host state. The signed ro
 |---------|----------|
 | Bad base update | sd-boot boot counting should roll back after failed boots. Manual path: press Space at sd-boot menu and select the previous UKI/root slot. |
 | Bad sysext | Run `sudo myosi extension-disable NAME`, or boot previous base / emergency shell and remove the bad image from `/var/lib/extensions/`, then reboot. |
-| Broken local `/etc` file | Restore the verity-baked default: `cp /usr/share/factory/etc/<path> /etc/<path>` (the factory tree at `/usr/share/factory/etc` is the source `myosi-etc-seed.service` already used at first boot). For full reset of one subtree: `rm -rf /etc/<subdir>` then reboot — `myosi-etc-seed.service` does NOT re-fire on the missing subdir alone; you have to copy from `/usr/share/factory/etc/<subdir>` manually OR wipe all of `/etc` (see below). |
-| Reset entire `/etc` to verity baseline | From recovery (or single-user mode): `mount /dev/mapper/data -o subvol=/,noatime /mnt && find /mnt/etc -mindepth 1 -xdev -delete && umount /mnt && reboot`. On next boot `ConditionDirectoryNotEmpty=!/sysroot/etc` is satisfied → `myosi-etc-seed.service` re-runs `cp -a /sysroot/usr/share/factory/etc/. /sysroot/etc/` → `/etc` returns to verity baseline. |
+| Broken local `/etc` file | `myosi etc-reset <path>` then reboot — the overlay drops this host's copy and the image's version shows through again. A whole subtree works the same way. |
+| Reset entire `/etc` to verity baseline | Boot once with `myosi.etc=volatile` to confirm the factory tree is healthy — nothing is destroyed, the upper is only hidden. To make it permanent: `mount /dev/mapper/data -o subvol=/state,noatime /mnt && rm -rf /mnt/etc && umount /mnt && reboot`. |
 | Root corruption | dm-verity detects it. Boot the other slot or reinstall from the latest signed `myosi_*.raw.zst`; restore `/var` and `/home` from backup. |
 | Lost LUKS passphrase, no TPM2 slot | Data is unrecoverable. Reinstall and restore from backup. |
 | Lost LUKS passphrase, TPM2 still unlocks | Boot normally, then add a new passphrase with `systemd-cryptenroll --password <partition>`. |
@@ -2165,8 +2167,8 @@ sudo systemd-sysext list
   - `systemd-repart.service` completed successfully or exited with the whitelisted no-free-space code.
   - `StandardOutput=journal+console` on the service ensures errors reach the framebuffer — check `journalctl -b` from an emergency shell.
 
-### `sysroot-etc.mount` unmounted by initrd-cleanup isolate
-- `initrd-cleanup.service` runs `systemctl --no-block isolate initrd-switch-root.target` seconds before the pivot. Without `IgnoreOnIsolate=yes`, the mount is stopped and the kernel pivots into an empty `/etc`. Fixed by setting `IgnoreOnIsolate=yes` on `sysroot-etc.mount`; ordering is maintained via `After=myosi-data-attach.service` and `Requires=` on the parent `initrd-fs.target`.
+### `sysroot-etc.mount` unmounted by initrd-cleanup isolate (historical)
+- `initrd-cleanup.service` runs `systemctl --no-block isolate initrd-switch-root.target` seconds before the pivot. Without `IgnoreOnIsolate=yes`, the mount was stopped and the kernel pivoted into an empty `/etc`. No longer reachable: `myosi-etc-assemble.service` performs the mounts itself, so there is no mount unit for the isolate to stop.
 
 ### `/dev/mapper/data` or `/var` is only ~240 MiB after install
 - The data partition should grow in the initrd before pivot. If it stays tiny, inspect `journalctl -b -u systemd-repart.service -u myosi-data-attach.service` from the failed boot or emergency shell.
@@ -2232,7 +2234,7 @@ dm-verity provides partition-level Merkle-tree signing — the whole root data p
 sysusers.d `u` type only accepts UIDs in the system range (< 1000). Asking for UID 1000 silently falls back to auto-allocation + locked password + nologin shell. Shipping `/etc/shadow` with the hash works the same way `myos` does in its bootc image. sysusers still creates the user (UID, groups, shell), preserving the shipped hash.
 
 **Why ship baseline config in `/etc/`?**
-sshd, sudo, podman, NetworkManager, and firewalld read their active config from `/etc/`. myosi therefore seeds security-sensitive defaults in `mkosi.extra/etc/` as the verity-protected baseline, `mkosi.finalize` snapshots that baseline to `/usr/share/factory/etc` (the verity-baked factory tree), and `myosi-etc-seed.service` copies it into the empty `/etc` subvol on first boot only. Subsequent boots skip the seed (`ConditionDirectoryNotEmpty=!/sysroot/etc` gate); operator owns `/etc` afterwards. Reusable signed configuration ships as sysexts under `/usr` instead of stacking a confext layer.
+sshd, sudo, podman, NetworkManager, and firewalld read their active config from `/etc/`. myosi therefore keeps security-sensitive defaults in `mkosi.extra/etc/` as the verity-protected baseline, `mkosi.finalize` snapshots that baseline to `/usr/share/factory/etc`, and that tree is the overlay's lower — so those defaults stay live and keep updating with the image unless this host has explicitly overridden the file. Reusable signed configuration ships as sysexts under `/usr` instead of stacking a confext layer.
 
 **Why `vm.swappiness=180`?**
 zram is always-on. Swap pages go to zstd-compressed RAM, not disk. Aggressive swappiness is correct in that regime. Without zram, 180 would thrash to disk; with it, you get effective memory compression.
@@ -2244,16 +2246,18 @@ A slim signed base + per-host opt-in sysexts means every host runs the same upda
 slirp4netns works but is slow, IPv6-limited, and the legacy default. pasta (passt) is faster (kernel-based packet shuttling), has full IPv6 support, and is the default in podman 5.x+. Configured via `default_rootless_network_cmd = "pasta"` in `/etc/containers/containers.conf`. myos uses slirp4netns — myosi deliberately diverges.
 
 **Why is `/etc` writable when the rest of the root is RO?**
-systemd-sysusers, systemd-machine-id-commit, sshd-keygen, NetworkManager, and password changes need writable `/etc` at runtime. myosi keeps `/etc` as a real persistent btrfs subvolume on `data-luks`, seeded from the verity-baked `/usr/share/factory/etc` factory tree by `myosi-etc-seed.service` (initrd) on first boot only. Host-owned config should still prefer signed sysexts; local `/etc` edits are for machine-local state and emergency overrides.
+systemd-sysusers, systemd-machine-id-commit, sshd-keygen, NetworkManager, and password changes need writable `/etc` at runtime. myosi gets that from an overlay whose upper is a btrfs subvolume on `data-luks`: writes land in `/.myosi/etc`, everything else is read straight from the verity-baked factory tree. Host-owned config should still prefer signed sysexts; local `/etc` edits are for machine-local state and emergency overrides.
 
-**Why is `/etc` a btrfs subvol instead of an overlay over `/usr/share/factory/etc`?**
-The earlier overlay model (`lowerdir=/usr/share/factory/etc`, `upperdir=/var/etc`) had three structural problems that the subvol replacement fixes at once: (1) the overlay pinned `/var` open at shutdown — PID 1 held file descriptors on `/etc` files through the overlay, so `umount2(0)` on `var.mount` returned EBUSY and the unit logged FAILED; (2) overlayfs caches the upperdir's SELinux context at mount time, so a first-boot `restorecon` race was unavoidable and required a `setfattr` pass + `myosi-firstboot-relabel.service` to win it; (3) overlay copy-up on first write to a `/usr/share/factory/etc/...` path persisted stale content into `/var/etc/` across image upgrades. With `/etc` as a plain btrfs subvol mounted directly: shutdown unmounts cleanly (no overlay between PID 1 and `data-luks`), SELinux labels inherit from the copy source at `myosi-etc-seed.service` time (no race), and operator-modified `/etc` files persist untouched across image upgrades. Trade-off: new factory defaults in `/usr/share/factory/etc/` on later images are NOT auto-merged into `/etc` (same bootc-style "operator owns /etc" semantic), so operators run `diff -ruN /etc /usr/share/factory/etc` after upgrades to spot drift they care about.
+**Why is `/etc` an overlay instead of a plain btrfs subvolume?**
+A plain subvolume has to be seeded once and is then frozen: files added to `/usr/share/factory/etc` in later images never arrive, changed defaults never apply, and reconciliation depends on an operator remembering to diff after every upgrade. That is not a hypothetical — this fleet ran for months without `/etc/myosi/users/` and with a stale `selinux/targeted/policy/` because both were added to the factory tree after first boot. The overlay inverts the default: untouched paths track the image, touched paths stay yours, and the upper is an exact record of the difference.
+
+An earlier overlay attempt was retired, but its problems were all properties of putting the upper at `/var/etc` — `/var` cannot mount before `/etc`, PID 1 pinned `var.mount` open at shutdown, and the upper's SELinux context was cached before the first-boot relabel. Moving the upper to its own `/state` subvolume mounted in the initrd removes all three. The remaining cost is real and specific: copy-up is per-file and permanent until reset, so a file touched for any reason stops tracking the image until `myosi etc-prune` or `myosi etc-reset` puts it back. `myosi etc-drift` exists to make that visible rather than silent.
 
 **Why does `myosi-data-attach` use `udevadm info` instead of `blkid` for partition metadata?**
 `blkid -s PART_ENTRY_TYPE` silently exits 2 on dm-verity-backed partitions — it tries to probe the filesystem layer and aborts before reporting partition-table metadata. `udevadm info --query=property` reads `ID_PART_ENTRY_TYPE`/`ID_PART_ENTRY_NAME` from udev's per-device DB, which is populated at coldplug time from the parent disk's partition table. Since `udevadm settle` runs before partition discovery, the values are always available. The helper also parses the property dump with pure bash (`IFS='=' read`) because mkosi-initrd ships no awk/grep/cut.
 
-**Why does `sysroot-etc.mount` have `IgnoreOnIsolate=yes`?**
-`initrd-cleanup.service` runs `systemctl --no-block isolate initrd-switch-root.target` seconds before the pivot. This isolate stops every unit not pulled in by the target. Without `IgnoreOnIsolate=yes`, `sysroot-etc.mount` would be stopped seconds before pivot — the kernel would switch root into an empty `/etc`, SELinux policy load would fail, and pid 1 would freeze. With `IgnoreOnIsolate=yes`, the mount survives the isolate. The parent `initrd-fs.target` `Requires=` it, so a start-time failure still surfaces in the emergency shell.
+**Why does `myosi-etc-assemble.service` mount from a script instead of `.mount` units?**
+`initrd-cleanup.service` runs `systemctl --no-block isolate initrd-switch-root.target` seconds before the pivot, and that isolate stops every unit not pulled in by the target. The old `sysroot-etc.mount` needed `IgnoreOnIsolate=yes` or the kernel would pivot into an empty `/etc` and pid 1 would freeze on the SELinux policy load. A mount made by a `oneshot` script is not represented by a mount unit at all, so the isolate has nothing to stop — the hazard is structural rather than defended against. The script also needs conditional logic no unit file can express: create the subvolume if the host predates it, apply staged resets, and honour `myosi.etc=volatile` / `myosi.etc=legacy`.
 
 **Why isn't `/var` mounted in the initrd?**
 Nothing in the initrd phase reads `/var`, and `systemd-gpt-auto-generator` already emits `var.mount` post-pivot from the DPS `Type=var` partition. With `DefaultSubvolume=/var` in `90-data.conf`, the auto-generated mount uses the correct btrfs subvolume automatically. Same lifecycle as `home.mount` and `srv.mount`. `/etc` is the special case — PID 1 reads `/etc/selinux/config` + `/etc/systemd/system.conf` synchronously at startup, so the mount must fire before pivot.
@@ -2278,7 +2282,7 @@ Intentional. `myosi` is an atomic, signed OS — installing arbitrary user-space
 |-----------|--------|
 | **v1: scaffolding** | ✅ done — slim base + sysexts (desktop, containers, firmware, virt, nvidia*); signing infra; transfer defs; install scripts; CI workflow. Earlier drafts shipped per-host confexts as the default; the confext layer has since been retired (single `/etc` overlay), and all reusable signed configuration ships as sysexts under `/usr`. |
 | **v1.1: declarative passwd + base hardening** | ✅ done — sysusers + shipped shadow + subuid/subgid + sudo + sysctl + ssh + zram + modprobe + udev |
-| **v1.2: writable /etc in real initrd** | ✅ done — cpio sub-image `mkosi.images/initrd/` (Include=mkosi-initrd, bash+cryptsetup+btrfs-progs+util-linux+attr); `myosi-data-attach.service` finds root disk, selects its `Type=var` partition, unlocks as `/dev/mapper/data` (key-file probe → TPM2/passphrase fallback), unlocks `data-N` pool members across ANY disk, scans btrfs, seeds + labels the `/etc` subvol; `sysroot-etc.mount` mounts `/etc` btrfs subvolume (`IgnoreOnIsolate=yes` to survive initrd-cleanup isolate); `initrd-fs.target` `Requires=` it. `/var` is mounted post-pivot by gpt-auto-generator (Type=var + DefaultSubvolume=/var), same lifecycle as home.mount and srv.mount. Uses `udevadm info` for partition metadata (blkid exits 2 on dm-verity partitions). No `/etc/fstab` or `/etc/crypttab` in the sealed root — all unlock/mount declarative. **The initial overlayfs `/etc` (lower=`/usr/share/factory/etc`, upper=`/var/etc`) was retired in favor of `/etc` as a real persistent btrfs subvolume seeded from `/usr/share/factory/etc` by `myosi-data-attach` in the initrd.**
+| **v1.2: writable /etc in real initrd** | ✅ done — cpio sub-image `mkosi.images/initrd/` (Include=mkosi-initrd, bash+cryptsetup+btrfs-progs+util-linux+attr); `myosi-data-attach.service` finds root disk, selects its `Type=var` partition, unlocks as `/dev/mapper/data` (key-file probe → TPM2/passphrase fallback), unlocks `data-N` pool members across ANY disk, scans btrfs; `myosi-etc-assemble.service` then mounts the `/state` subvolume at `/sysroot/.myosi` and overlays it with the factory tree onto `/sysroot/etc`. `/var` is mounted post-pivot by gpt-auto-generator (Type=var + DefaultSubvolume=/var), same lifecycle as home.mount and srv.mount. Uses `udevadm info` for partition metadata (blkid exits 2 on dm-verity partitions). No `/etc/fstab` or `/etc/crypttab` in the sealed root — all unlock/mount declarative. **The `/etc` overlay was retired once (upper at `/var/etc`) in favour of a plain seeded subvolume, then reinstated with the upper on its own `/state` subvolume mounted at `/.myosi` — see "The /etc overlay".**
 | **v1.3: signed kernel modules + module blacklist on UKI cmdline** | ✅ done — every `nvidia*.ko` / `zfs.ko` / `spl.ko` signed with `boot.key`; `module_blacklist=` baked into UKI cmdline as the single canonical blacklist source. |
 | **v1.4: NVIDIA sysexts working** | ✅ done — both `nvidia` (595.x open, Turing+) and `nvidia-580xx` (580.x proprietary, Pascal/Maxwell/Volta) build cleanly against kernel 7.0.10. Root cause was missing `/dev` + `/proc` in mkosi sandbox chroot, fixed via `mkosi.shared/kmod-build.sh`. |
 | **v1.5: OpenZFS sysext via upstream tarball** | ✅ done — `zfs-build.sh` pulls `zfs-${ZFS_VERSION}.tar.gz`, generates SRPMs with `make srpm-utils srpm-kmod`, rebuilds via `kmod_exec rpmbuild`, signs `zfs.ko` + `spl.ko`. No dependency on zfsonlinux.org/fedora packaging that lags new Fedora releases. |
@@ -2483,7 +2487,7 @@ mkosi ssh -- veritysetup status root
 mkosi ssh -- mount | grep -E 'erofs|btrfs'
 # Should show:
 #   /dev/mapper/root on / type erofs (ro,...)
-#   /dev/mapper/data on /etc type btrfs (rw,...,subvol=/etc)
+#   overlay on /etc type overlay (rw,...,upperdir=/.myosi/etc)
 #   /dev/mapper/data on /var type btrfs (rw,...,subvol=/var)
 
 mkosi ssh -- swapon --show
@@ -2568,7 +2572,7 @@ veritysetup status root
 
 # 3. /etc persistent btrfs subvolume
 findmnt /etc
-# Should show: /etc  /dev/mapper/data[/etc]  btrfs  rw,...,subvol=/etc
+# Should show: /etc  overlay  overlay  rw,...,upperdir=/.myosi/etc
 
 # 4. /usr read-only
 findmnt /usr
@@ -2959,7 +2963,7 @@ Reboot to confirm the device no longer appears in `/proc/mounts` / `btrfs filesy
 | New base image update breaks boot | sd-boot boot-counter auto-rolls back after 3 failed boots. Manual: press space at sd-boot menu, pick the previous UKI. |
 | One data disk in `/var` raid0 fails | Pool is dead. Mount with `degraded` to attempt rescue, restore from backups. |
 | One data disk in `/var` raid1/raid10/raid1c3/raid1c4 fails | Boot with `rootflags=degraded` or add to the new disk's mount options, then `btrfs replace start` onto the new disk. |
-| `/etc` drift causing weird state | Boot rescue, `mount /dev/mapper/data -o subvol=/ /mnt`, `find /mnt/etc -mindepth 1 -xdev -delete`, reboot. `myosi-etc-seed.service` re-seeds `/etc` from the factory tree. |
+| `/etc` drift causing weird state | `myosi etc-list` shows exactly what this host changed; `myosi etc-reset <path>` or `myosi etc-prune apply` hands paths back to the image. Boot with `myosi.etc=volatile` to prove the factory tree itself is fine. |
 | SecureBoot toggle invalidates TPM | TPM unlock fails → passphrase prompt. Re-enroll TPM2: `sudo systemd-cryptenroll --wipe-slot=tpm2 <luks> && sudo systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7+14 <luks>`. |
 
 ## 4. Verifying a clean install

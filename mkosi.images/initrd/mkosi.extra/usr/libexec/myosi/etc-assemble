@@ -83,7 +83,10 @@ apply_pending() {
             ''|'#'*) continue ;;
             /*|*..*) log "WARNING skipping unsafe path: $rel"; continue ;;
         esac
-        rm -rf -- "$STATE/etc/$rel" && log "  reset $rel" \
+        # ${STATE:?} — an empty STATE here would make this rm -rf the
+        # REAL /etc. Cheap guard against a future refactor of the mode
+        # switch above leaving it unset.
+        rm -rf -- "${STATE:?}/etc/$rel" && log "  reset $rel" \
             || log "  WARNING could not reset $rel"
     done < "$queue"
     rm -f "$queue"
