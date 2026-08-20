@@ -34,11 +34,11 @@ mkdir -p "$BUILDROOT/srv"
 # future base trim can't silently break the mount target.
 mkdir -p "$BUILDROOT/home"
 
-# Mountpoint for the /state subvolume that backs the /etc overlay. The
-# runtime root is read-only erofs, so etc-assemble cannot create this in
-# the initrd — it has to exist in the sealed image. Dot-prefixed to keep
-# `ls /` clean; the same shape as mybox's /.mybox state bind.
-mkdir -p "$BUILDROOT/.myosi"
+# Mountpoint for the /etc subvolume that backs the /etc overlay. The
+# runtime root is read-only erofs, so nothing can create this directory at
+# boot — it has to exist in the sealed image, the same way /home and /srv
+# do. Dot-prefixed to keep `ls /` clean.
+mkdir -p "$BUILDROOT/.etc"
 
 # Version metadata. KVER is empty for sub-images that strip
 # /usr/lib/modules → KERNEL_VERSION=unknown.

@@ -1,0 +1,31 @@
+[Unit]
+Description=/sysroot/.etc (btrfs subvolume holding the /etc overlay layers)
+Documentation=https://github.com/aboglioli/myosi/blob/main/README.md
+DefaultDependencies=no
+# Dependency rationale: see myosi-data-attach.service — same rules for
+# every unit in the /etc chain.
+IgnoreOnIsolate=yes
+OnFailure=emergency.target
+After=myosi-data-attach.service
+Wants=myosi-data-attach.service
+Before=myosi-etc-prepare.service initrd.target initrd-switch-root.target
+
+[Mount]
+# The /etc subvolume is no longer /etc itself — it is the store that holds
+# the two overlay layers:
+#
+#     /.etc/etc     the upper: everything this host has changed
+#     /.etc/.work   overlayfs scratch space
+#
+# They have to be siblings inside one subvolume. The kernel rejects a
+# workdir on a different mount (EINVAL), and on btrfs a workdir in a
+# different subvolume makes every copy-up fail EXDEV — a mount that looks
+# fine and then breaks on the first write. That is why the subvolume root
+# cannot be the upperdir and why this mounts at /.etc instead of /etc.
+What=/dev/mapper/data
+Where=/sysroot/.etc
+Type=btrfs
+Options=defaults,noatime,compress=zstd:3,subvol=/etc
+
+[Install]
+WantedBy=initrd.target initrd-switch-root.target

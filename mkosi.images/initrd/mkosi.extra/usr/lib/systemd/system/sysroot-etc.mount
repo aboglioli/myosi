@@ -1,0 +1,39 @@
+[Unit]
+Description=/sysroot/etc (overlay: factory defaults + this host's changes)
+Documentation=https://github.com/aboglioli/myosi/blob/main/README.md
+DefaultDependencies=no
+# Dependency rationale: see myosi-data-attach.service — same rules for
+# every unit in the /etc chain. IgnoreOnIsolate= is load-bearing here:
+# initrd-cleanup.service isolates initrd-switch-root.target seconds before
+# the pivot, and without it this mount is stopped and pid 1 switches root
+# into an empty /etc.
+IgnoreOnIsolate=yes
+OnFailure=emergency.target
+After=myosi-etc-prepare.service
+Wants=myosi-etc-prepare.service
+Before=initrd.target initrd-switch-root.target
+
+[Mount]
+# /etc is assembled, not stored. The factory tree under the sealed root is
+# the lower, so any path this host has not touched keeps coming from the
+# image and updates with it; the upper holds only what was changed here.
+#
+# Mounted in the initrd because pid 1 reads /etc/selinux/config and
+# /etc/systemd/system.conf synchronously at startup — no unit in the real
+# system could get here in time. The mount is inherited across
+# switch_root, which is why there is no etc.mount in the main system.
+#
+# redirect_dir=on: without it, renaming a directory that exists only in
+# the factory lower fails with EXDEV, and `mv` inside /etc is something
+# operators do.
+#
+# The paths below are recorded as they look from the initrd and are never
+# re-resolved, so /proc/self/mountinfo keeps showing /sysroot/... after
+# the pivot. Cosmetic; the overlay holds references, not paths.
+What=overlay
+Where=/sysroot/etc
+Type=overlay
+Options=lowerdir=/sysroot/usr/share/factory/etc,upperdir=/sysroot/.etc/etc,workdir=/sysroot/.etc/.work,redirect_dir=on
+
+[Install]
+WantedBy=initrd.target initrd-switch-root.target
