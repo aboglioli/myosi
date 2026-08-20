@@ -1,0 +1,41 @@
+[Unit]
+Description=Create and label the /etc overlay layers
+Documentation=https://github.com/aboglioli/myosi/blob/main/README.md
+DefaultDependencies=no
+# See myosi-data-attach.service for the full dependency rationale.
+IgnoreOnIsolate=yes
+OnFailure=emergency.target
+After=sysroot-.etc.mount
+Wants=sysroot-.etc.mount
+Before=sysroot-etc.mount initrd.target initrd-switch-root.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+# Both directories must exist before the overlay can mount, and both are
+# empty on a freshly formatted host — `btrfs subvolume create` leaves no
+# content and no SELinux xattr behind.
+#
+# The labels are not optional. overlayfs takes the merged /etc's own
+# directory label from the upperdir, and files CREATED in /etc inherit
+# from it. Leave the upper unlabeled and /etc comes up unlabeled_t, which
+# means every file first written at runtime — machine-id, the ssh host
+# keys, NetworkManager connections — lands unlabeled_t under enforcing.
+# Verified by mounting the overlay both ways.
+#
+# Stamping here also means the label is in place BEFORE the overlay is
+# mounted. overlayfs resolves the upper's context at mount time, and
+# relabelling afterwards was the first-boot race that sank the earlier
+# /var/etc attempt.
+#
+# If sysroot-.etc.mount failed, /sysroot/.etc is still the read-only erofs
+# directory baked into the image, so mkdir fails with EROFS and we land in
+# the emergency shell instead of pivoting into a broken /etc.
+ExecStart=/usr/bin/mkdir -p /sysroot/.etc/etc /sysroot/.etc/.work
+ExecStart=/usr/bin/setfattr -n security.selinux -v system_u:object_r:etc_t:s0 /sysroot/.etc/etc
+ExecStart=/usr/bin/setfattr -n security.selinux -v system_u:object_r:etc_t:s0 /sysroot/.etc/.work
+
+[Install]
+WantedBy=initrd.target initrd-switch-root.target
