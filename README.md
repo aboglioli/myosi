@@ -2084,6 +2084,43 @@ The image ships exactly one known credential, it is unusable remotely, and step 
 
 **Rootless podman:** `/etc/subuid` + `/etc/subgid` bake only the static image-owned identities — `root` at `1500000:200000`, `containers` at `2000000:1000000`. The interactive user is **not** baked (the image ships none, and the name is per-host); `myosi-homed-user@<name>` allocates it the first free `1000000`-wide gap at or above `100000` on provisioning.
 
+
+### Container storage layout
+
+Root keeps the upstream defaults; only rootless users are relocated.
+
+| | graphroot | runroot |
+|---|---|---|
+| root | `/var/lib/containers/storage` (stock) | `/run/containers/storage` (stock) |
+| rootless `<uid>` | `/var/lib/containers/users/<uid>` | `$XDG_RUNTIME_DIR/containers` |
+
+Rootless storage is moved out of `$HOME` because homed's idmapped mount maps only the user's own UID — subuid (100000+) writes inside the LUKS home fail `lchown` with `EOVERFLOW`. Keeping it on `/var` also means lingering user quadlets can start before the home is unlocked, and the home stays small.
+
+Both come from one file, `/usr/share/containers/storage.conf`:
+
+```toml
+graphroot             = "/var/lib/containers/storage"
+rootless_storage_path = "/var/lib/containers/users/$UID"
+```
+
+Two behaviours of `containers/storage` are worth knowing, because neither is obvious and both bite:
+
+- **`graphroot` must stay set.** Dropping it does not "let rootless win" — with `graphroot` empty, `rootless_storage_path` is used for *every* UID, so rootful root silently lands in `users/0` and whatever is in the real graphroot is orphaned. Setting `graphroot` does not affect rootless users: the rootless options are built in a fresh struct that never copies it.
+- **`[storage.options]` is root-only.** The rootless path discards all graph-driver options, so `mountopt` and `additionalimagestores` apply to root's store alone. `[storage.options.pull_options]` is the exception and does reach rootless — which is why `enable_partial_images` (zstd:chunked partial pulls) is set there.
+
+`mountopt` is plain `nodev`. `metacopy=on` forces `Native Overlay Diff` off, which pushes every build/commit/push onto the slower naive-diff path; building is the rootful workload here, so the trade goes the other way.
+
+**`/var/lib/containers` is deliberately *not* NoCOW.** `nodatacow` implies `nodatasum`, so scrub cannot verify a single byte of it, and it disables compression — measured on a host that had `+C` set: 8.7 G of layers at 0% compression, while the rootless store, which never inherited the flag, compresses 41% (432 M → 178 M). btrfs scopes `nodatacow` to frequent-overwrite workloads (databases, VM images); image layers are written once and read many times. No distribution's packaging sets `+C` here — the only upstream NoCOW policy is systemd's on `/var/log/journal`, and its own comment justifies that by journal files carrying internal checksums, which layer files do not. `/var/lib/libvirt` and `/var/lib/incus` keep `+C`: VM disk images are precisely the documented case.
+
+`tmpfiles.d` simply has no entry for the path, which sets policy for new files only — a host built when the `+C` line still existed keeps the inherited flag and must be cleared by hand once:
+
+```bash
+sudo chattr -C /var/lib/containers /var/lib/containers/cache
+lsattr -d /var/lib/containers /var/lib/containers/cache
+```
+
+Clearing it on a directory only affects files created afterwards; btrfs refuses to flip a regular file that already has extents. Existing layers therefore stay uncompressed until they are re-pulled.
+
 ---
 
 ## Hardening + tuning shipped in the base
