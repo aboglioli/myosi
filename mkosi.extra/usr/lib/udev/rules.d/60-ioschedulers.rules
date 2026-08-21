@@ -1,19 +1,48 @@
-# Auto-select blk-mq scheduler per device class: kyber for SSD/NVMe,
-# bfq for HDD/SD, mq-deadline for virtio guest disks. Loop/ram devices
-# deliberately excluded — they lack the queue/scheduler sysfs attribute
-# and would log "Could not chase sysfs attribute" per event.
+# Auto-select the blk-mq I/O scheduler per device class.
+#
+# ENV{DEVTYPE}=="disk" is on every rule because every KERNEL pattern here
+# also matches PARTITIONS (sd[a-z]* matches sda1, nvme[0-9]*n[0-9]* matches
+# nvme0n1p1, vd[a-z]* matches vda1), and a partition has no queue/
+# directory. The rotational rules survived that by accident — their
+# ATTR{queue/rotational} match just fails on a partition — but the virtio
+# rule has no match before its assignment and logged
+# "Could not chase sysfs attribute .../vda1/queue/scheduler" for every
+# partition on every boot.
+#
+# Scheduler choice is a latency/throughput/CPU trade, NOT a wear factor:
+# nothing here shortens the life of a disk. Flash endurance is governed by
+# write volume and TRIM (see discard=async on the btrfs mounts and discard
+# on the LUKS devices).
 
-# SSDs
-ACTION=="add|change", KERNEL=="sd[a-z]*", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="kyber"
-# NVMe
-ACTION=="add|change", KERNEL=="nvme[0-9]*n[0-9]*", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="kyber"
-# eMMC SSD
-ACTION=="add|change", KERNEL=="mmcblk[0-9]*", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="kyber"
+# Fedora ships /usr/lib/udev/rules.d/60-block-scheduler.rules, which sets
+# bfq for sd*/mmcblk*/sr* disks. udev applies rules files in lexical order
+# and last assignment wins: "60-block-scheduler" sorts before
+# "60-ioschedulers", so every device this file names ends up with the
+# scheduler chosen here. Renaming this file to sort earlier would silently
+# hand SATA SSDs back to bfq.
 
-# HDDs
-ACTION=="add|change", KERNEL=="sd[a-z]*", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"
-# SD cards
-ACTION=="add|change", KERNEL=="mmcblk[0-9]*", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"
+# NVMe -> none. Modern NVMe exposes many hardware queues (32 per device on
+# this fleet) and sub-100us latency, so a scheduler contributes queueing
+# delay and CPU time while merging almost nothing. This is also what the
+# kernel picks by default for multi-queue devices; the previous `kyber`
+# setting was overriding that default with a slower one. Kyber only pays
+# off when reads must be protected from a saturating write stream — if you
+# want that back, set kyber here and measure it.
+ACTION=="add|change", ENV{DEVTYPE}=="disk", KERNEL=="nvme[0-9]*n[0-9]*", ATTR{queue/scheduler}="none"
 
-# Guest virtio disks
-ACTION=="add|change", KERNEL=="vd[a-z]*", ATTR{queue/scheduler}="mq-deadline"
+# SATA / USB SSD -> mq-deadline. One hardware queue and real command
+# overhead, so request merging still earns its keep.
+ACTION=="add|change", ENV{DEVTYPE}=="disk", KERNEL=="sd[a-z]*", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="mq-deadline"
+
+# HDD -> bfq. Seeks dominate; bfq keeps the desktop responsive while a
+# background job streams.
+ACTION=="add|change", ENV{DEVTYPE}=="disk", KERNEL=="sd[a-z]*", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"
+
+# eMMC / SD -> bfq. Slow flash where interactivity matters more than peak
+# throughput. No rotational split: these report 0 or 1 inconsistently and
+# the answer is the same either way.
+ACTION=="add|change", ENV{DEVTYPE}=="disk", KERNEL=="mmcblk[0-9]*", ATTR{queue/scheduler}="bfq"
+
+# virtio guest disks -> none. The host already schedules against the real
+# device; queueing a second time in the guest only adds latency.
+ACTION=="add|change", ENV{DEVTYPE}=="disk", KERNEL=="vd[a-z]*", ATTR{queue/scheduler}="none"

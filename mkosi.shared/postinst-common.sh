@@ -23,6 +23,19 @@ else
     echo "postinst-common: WARNING $SUBS missing — /usr/share/factory/etc will be unlabeled"
 fi
 
+# Shadow files must not be world-readable. git cannot store mode 0000, so
+# the tracked mkosi.extra/etc/shadow arrives as 0644 and would ship every
+# password hash to any local reader. Fixed here, before mkosi.finalize
+# snapshots /etc into the factory tree that the /etc overlay serves.
+# `if`, not `[ -e ] && chmod`: the AND-list returns 1 when the file is
+# absent, and as the loop's last statement that aborts the build under
+# `set -e` — shadow- does not exist in a fresh buildroot.
+for f in shadow gshadow shadow- gshadow-; do
+    if [ -e "$BUILDROOT/etc/$f" ]; then
+        chmod 0000 "$BUILDROOT/etc/$f"
+    fi
+done
+
 # Rootfs is read-only erofs at runtime: redirect /root → var/roothome
 # and /mnt → var/mnt (tmpfiles provisions the targets each boot).
 # /srv stays a real mountpoint (srv.mount, btrfs subvol on data-luks).
