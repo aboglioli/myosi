@@ -1663,34 +1663,95 @@ shipped); policy changes ship as images.
 
 ## Migrating an existing host to the /etc overlay
 
-**Not yet implemented — do not upgrade a live host across this change.**
+The `/etc` subvolume keeps its name; only its *contents* change meaning. It
+used to hold `/etc` directly, and now it holds `etc/` (the upper) and
+`.work/`. The migration is **additive**: build those two directories while
+the old flat tree is still in place, so the previous A/B slot keeps booting
+until you choose to delete it.
 
-The `/etc` subvolume keeps its name, so nothing needs to be created. But
-its *contents* change meaning: it used to hold `/etc` directly, and now it
-holds `etc/` and `.work/`. A host that boots the new image without
-migrating will find no `etc/` directory, `myosi-etc-prepare.service` will
-create an empty one, and `/etc` comes up as the bare factory tree — the
-host boots, but amnesiac: factory hostname, no ssh host keys, no
-NetworkManager connections, a fresh machine-id.
+Because a pre-overlay host has that subvolume mounted at `/etc`, creating
+`/etc/etc` and `/etc/.work` there produces exactly what the new initrd
+looks for at `/.etc/etc` and `/.etc/.work`. No rescue environment needed.
 
-Booting the previous A/B slot from the sd-boot menu is the way back
-**while the host is still un-migrated**: the old initrd mounts
-`subvol=/etc` flat and finds its tree untouched, because the new image
-only ever added an `etc/` subdirectory alongside it.
+**Clear the authselect checksum first — this is the lockout trap.**
 
-That stops being true once you migrate. After the contents move into
-`etc/`, an old image mounting `subvol=/etc` flat sees `etc/` and `.work/`
-where it expects `passwd` and `selinux/`, and pid 1 freezes on the policy
-load. Rolling back across the migration therefore needs the same
-procedure in reverse, which is part of what the runbook still owes.
+```bash
+sudo rm -f /var/lib/authselect/checksum
+```
 
-The migration shape is settled and validated in a scratch pool, it just
-has no runbook yet: move the subvolume's contents into an `etc/`
-subdirectory, then `myosi etc-prune apply` and reboot. Pruning is what
-makes it worthwhile — in a simulation seeded with this host's real
-factory tree, a 574-file upper collapsed to the 2 files actually changed
-locally, with `/etc` still complete because everything else showed
-through from the image again.
+`authselect-apply-changes.service` reconciles the PAM stack at boot, but it
+compares the profile *source* against that checksum — never the generated
+files against `authselect.conf`. A host that already has a checksum is told
+"Installed profiles did not change" and keeps whatever `/etc/authselect` it
+is handed. Under the overlay that is the factory copy, and if the factory
+copy lacks `pam_systemd_home.so` then **no homed user can authenticate, on
+tty or over ssh**. `/var` survives the migration, so its stale checksum
+survives with it. Removing the checksum makes the service regenerate.
+
+The same rule applies forever after: never `myosi etc-reset authselect`
+without clearing the checksum in the same breath.
+
+Then compute what genuinely differs from the image you are about to boot —
+not the one you are running:
+
+```bash
+sudo myosi update                                    # stage, do not reboot
+sudo mount -o ro /dev/disk/by-partlabel/root-<NEW> /mnt/newroot
+NEW=/mnt/newroot/usr/share/factory/etc
+
+cd /etc
+find . -mindepth 1 \( -type f -o -type l \) -printf '%P\n' | sort | while read -r f; do
+    if [ -e "$NEW/$f" ] || [ -L "$NEW/$f" ]; then
+        if [ -L "$f" ] || [ -L "$NEW/$f" ]; then
+            [ "$(readlink -- "$f")" = "$(readlink -- "$NEW/$f")" ] || echo "differs  $f"
+        else
+            cmp -s -- "$f" "$NEW/$f" || echo "differs  $f"
+        fi
+    else
+        echo "hostonly $f"
+    fi
+done
+```
+
+Everything absent from that list is byte-identical to the image and must
+NOT be copied — that is the whole point. Review what remains and copy only
+host identity and real local config into the upper:
+
+```bash
+mkdir -p /etc/etc /etc/.work
+cd /etc
+while read -r f; do cp -a --parents "$f" /etc/etc/; done < /root/etc-keep.txt
+chmod 0000 /etc/etc/shadow /etc/etc/shadow- /etc/etc/gshadow /etc/etc/gshadow-
+setfattr -n security.selinux -v system_u:object_r:etc_t:s0 /etc/etc /etc/.work
+```
+
+Keep: `machine-id`, `hostname`, `hosts` if edited, `localtime`, the ssh host
+keys, passwd/shadow/group/gshadow plus their `-` backups, `subuid`/`subgid`,
+`ld.so.cache` (it carries sysext library paths and nothing regenerates it
+early), every `sysupdate.d/*.feature.d/enable.conf` (lose these and your
+sysexts silently disable), the `systemctl enable` symlinks under
+`systemd/system/`, and your own drop-ins.
+
+Drop: `selinux/targeted/**` (the frozen policy — dropping it is the fix),
+`ld.so.cache`'s siblings under `pki/ca-trust/extracted/`, `dconf/db/`,
+`authselect/`, `.pwd.lock`, `.updated`, and anything that differs only
+because the image changed underneath a file you never edited.
+
+**Do not run `restorecon` on `/etc` between building the upper and
+rebooting.** It relabels by path, and `/etc/etc/shadow` matches no rule —
+it would lose `shadow_t` and break PAM after the switch.
+
+Verify before rebooting: the entry count matches your keep list, the ssh
+host keys are present, both feature `enable.conf` files are there, and
+`/etc/etc` plus `/etc/.work` are `etc_t`.
+
+Afterwards, `/.etc` still holds the old flat tree. Booting the previous
+slot works exactly as before while it is there. Deleting it is the point of
+no return:
+
+```bash
+sudo find /.etc -mindepth 1 -maxdepth 1 ! -name etc ! -name .work -exec rm -rf {} +
+```
 
 ---
 
@@ -1787,26 +1848,58 @@ Maintenance touches both. **Order matters: inner first, then outer.** Defragment
 | `btrfs filesystem defragment` | Coalesces extents on specific files/dirs. Helps random-write workloads (qcow2 images, sqlite, journal). `-r` recursive. `-c<algo>` re-compress. | Moderate. CoW gets undone on touched files — snapshots of the same content get diverged. |
 | `fstrim` | TELL underlying storage which blocks are free (`discard` ioctl). Improves SSD wear + LUKS allocation efficiency. | Cheap. Safe to run weekly. |
 
-### systemd timers (shipped enabled in the base)
+### Filesystem maintenance timers
 
 ```bash
-# Confirm timer state
-systemctl status fstrim.timer btrfs-scrub@-.timer btrfs-scrub@home.timer 2>/dev/null
+systemctl list-timers --all
 ```
 
-- `fstrim.timer` — weekly default on Fedora. Discards on every mounted FS that supports it.
-- `btrfs-scrub@<escaped-mountpoint>.timer` — monthly per-mountpoint scrub. Enable explicitly per subvolume you care about; the package ships templates, not instances. The instance name encodes the mountpoint via `systemd-escape`:
+Shipped enabled: `fstrim.timer` only (Fedora's weekly default; discards on every mounted FS that supports it).
+
+**Scrub is deliberately NOT enabled.** The `btrfsmaintenance` package is installed, so the native units exist — `btrfs-scrub`, `btrfs-balance`, `btrfs-trim`, `btrfs-defrag`, each with a `.service` and `.timer` — but every one of them is left inactive. Whether a multi-hour read of the whole pool belongs on a schedule depends on the host, so it is the operator's call.
+
+(`btrfs-progs` ships no systemd units of its own on Fedora. Earlier revisions of this document told you to enable a `btrfs-scrub@<mountpoint>.timer`; that template does not exist, and the command silently did nothing.)
+
+#### What scrub actually does
+
+It reads every allocated block, verifies it against its stored checksum, and where a second copy exists, rewrites the bad copy from the good one. It is not defragmentation, not balance, and it frees nothing.
+
+Note what btrfs already does without it: **checksums are verified on every read**, so corruption in a file you actually use surfaces as an EIO the moment you touch it. Scrub's added value is finding rot in data you have *not* read lately, and exercising the disks so a failing device shows up in `btrfs device stats` before it takes something with it.
+
+What it can repair depends on the profile, and on this layout the two halves differ:
+
+| | profile | scrub can |
+|---|---|---|
+| metadata | `RAID1` | detect **and repair** from the mirror |
+| data | `single` | detect only — there is no second copy |
+
+So a reported data checksum error is a restore-from-backup signal, not something scrub fixes.
+
+#### Running one by hand
+
+Scrub is per **filesystem**, not per subvolume: `/var`, `/etc`, `/home` and `/srv` are all subvolumes of the same `data-luks` btrfs, so one pass over `/var` covers all of them and every `data-N` pool member. The verity-erofs root needs nothing — dm-verity hashes every block it reads.
 
 ```bash
-# /var
-sudo systemctl enable --now btrfs-scrub@$(systemd-escape -p /var).timer
-# /home
-sudo systemctl enable --now btrfs-scrub@$(systemd-escape -p /home).timer
-# /etc
-sudo systemctl enable --now btrfs-scrub@$(systemd-escape -p /etc).timer
-# Inside an activated homed home (per-user shell):
-sudo systemctl enable --now btrfs-scrub@$(systemd-escape -p /home/user).timer
+sudo btrfs scrub start -B -c 3 -n 4 /var   # -B foreground, idle I/O class
+sudo btrfs scrub status /var
+sudo btrfs device stats /var               # non-zero counters = a disk going bad
 ```
+
+`-B` keeps it in the foreground so you see the result; drop it to run detached and poll with `status`.
+
+#### If you want it scheduled
+
+Point the packaged unit at the pool first — its default is `/`, which on myosi is read-only erofs and not btrfs at all:
+
+```bash
+sudo sed -i 's|^BTRFS_SCRUB_MOUNTPOINTS=.*|BTRFS_SCRUB_MOUNTPOINTS="/var"|' \
+    /etc/sysconfig/btrfsmaintenance
+sudo systemctl enable --now btrfs-scrub.timer
+```
+
+That edit lands in the `/etc` overlay upper, which is correct — it is a genuine per-host decision. `BTRFS_SCRUB_PERIOD` defaults to monthly; `btrfsmaintenance-refresh.path` rewrites the timer whenever you change the config.
+
+Balance, defrag and trim from the same package stay off. Balance in particular is operator judgment, not something to schedule unattended on a pool with `Data,single`.
 
 There is no `btrfs-balance@.timer` and no `btrfs-defragment@.timer` shipped by default — those are operator-judgment operations, not safe to schedule unattended.
 
