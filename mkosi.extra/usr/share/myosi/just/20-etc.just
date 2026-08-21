@@ -23,10 +23,15 @@ etc-list:
     # Without the upper we cannot tell what is overridden, and a
     # reassuring answer would be a wrong one.
     mountpoint -q /.etc || { echo "/.etc is not mounted — /etc is not overlay-backed on this boot." >&2; exit 1; }
+    # -type l as well as -type f: `systemctl enable` writes SYMLINKS here,
+    # and those are among the most important things an operator changes.
+    # Listing only regular files silently hid them, which made this
+    # command lie about being the complete record of local drift.
+    #
     # A deleted factory file leaves an overlayfs whiteout in the upper: a
     # character device with major/minor 0:0, not a regular file.
     cd {{UPPER}}
-    find . -mindepth 1 -type f -printf 'changed  %P\n'
+    find . -mindepth 1 \( -type f -o -type l \) -printf 'changed  %P\n'
     find . -mindepth 1 -type c -printf 'deleted  %P\n'
 
 # Show the content difference between /etc and the image's defaults.
@@ -62,7 +67,18 @@ etc-reset path:
         echo "$rel is not overridden here — it already comes from the image."
         exit 0
     fi
-    rm -rf "{{UPPER}}/$rel"
+    # Files and symlinks only. Removing a DIRECTORY from the upper of a
+    # mounted overlay breaks the merged listing of that path until the
+    # overlay is re-established: lookups by name keep working, but
+    # readdir returns nothing — which is exactly how /etc/profile.d and
+    # fonts/conf.d are consumed. Verified: only a remount restores it.
+    if [ -d "{{UPPER}}/$rel" ] && [ ! -L "{{UPPER}}/$rel" ]; then
+        echo "ERROR: $rel is a directory in the upper." >&2
+        echo "Reset its files individually; removing the directory itself" >&2
+        echo "would empty that path's listing until the next boot." >&2
+        exit 4
+    fi
+    rm -f "{{UPPER}}/$rel"
     echo "removed $rel from the overlay upper. Reboot to apply."
     echo "Until then /etc/$rel may still show the old content: the kernel"
     echo "does not promise a coherent view of an overlay whose upper was"
@@ -84,6 +100,15 @@ etc-prune apply="":
             dead+=("$rel"); echo "identical to image   $rel"
         fi
     done < <(cd {{UPPER}} && find . -mindepth 1 -type f -printf '%P\n')
+    # Symlinks with the same target as the image's. A `restorecon -R /etc`
+    # copies these up wholesale — it sets an xattr, which forces a
+    # copy-up — so a single relabel can pin dozens of image-owned links.
+    while IFS= read -r rel; do
+        if [ -L "{{FACTORY}}/$rel" ] && \
+           [ "$(readlink -- "{{UPPER}}/$rel")" = "$(readlink -- "{{FACTORY}}/$rel")" ]; then
+            dead+=("$rel"); echo "identical to image   $rel"
+        fi
+    done < <(cd {{UPPER}} && find . -mindepth 1 -type l -printf '%P\n')
     # A whiteout for a file the image no longer ships: hiding nothing.
     while IFS= read -r rel; do
         if [ ! -e "{{FACTORY}}/$rel" ]; then
@@ -98,5 +123,7 @@ etc-prune apply="":
         exit 0
     fi
     require_root
-    for rel in "${dead[@]}"; do rm -rf "{{UPPER}}/$rel"; done
+    # rm -f, never rm -rf: see the directory note in etc-reset. Nothing
+    # in `dead` is a directory, and this keeps it that way if it ever is.
+    for rel in "${dead[@]}"; do rm -f "{{UPPER}}/$rel"; done
     echo "dropped ${#dead[@]} entr(ies). Reboot to apply."
