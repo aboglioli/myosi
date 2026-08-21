@@ -21,7 +21,11 @@ for dir in /usr/lib/systemd/system/*.target.d; do
     job=$(systemctl show -P Job "$target" 2>/dev/null || true)
     [ "$state" = active ] || [ -n "$job" ] || continue
 
-    units=$(grep -hs "^Wants=" "$dir"/*.conf | cut -d= -f2- | xargs -r echo)
+    # `|| true`: grep exits 1 when a target's drop-ins declare only
+    # Upholds= (sockets.target.d does), and under set -e + pipefail that
+    # aborted the whole scan — every target sorted after the first such
+    # directory was silently skipped.
+    units=$(grep -hs "^Wants=" "$dir"/*.conf | cut -d= -f2- | xargs -r echo || true)
     [ -n "$units" ] || continue
 
     echo "sysext-wants: starting for ${target}: ${units}"
