@@ -1106,8 +1106,11 @@ present, which is the typical correlate.
 
 Two paths kept out of /home so homed-managed homes stay lean:
 
-- **Steam library** lives at `/var/games/steam` (pre-created by
-  `tmpfiles.d/myosi.conf`, owned by `user`). In Steam: Settings →
+- **Steam library** lives at `/var/games/steam`. Create it yourself —
+  `sudo mkdir -p /var/games/steam && sudo chown $USER: /var/games/steam`.
+  tmpfiles no longer pre-creates `/var/games`: it only made an empty
+  root-owned parent, and the per-user subdirectory always had to be made
+  and chowned by hand anyway. In Steam: Settings →
   Storage → Add Library Folder → `/var/games/steam`, mark as default
   for new installs. Game configs and save data stay in
   `~/.steam/steam/userdata/` (small).
