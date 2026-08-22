@@ -1405,6 +1405,9 @@ sudo myosi update
 
 #### 3i. Encrypted btrfs data pool — inspect and extend
 
+**Every RPM-owned path under `/var` is discarded on a fresh install.** repart creates `/var` as an empty subvolume at first boot, so the 1826 `/var` paths the image's packages own never appear. Most are recreated on demand by their daemon or by a `StateDirectory=`, but not all: `/var/log/journal` is owned by the systemd RPM, and journald's default `Storage=auto` is persistent *only if that directory exists*. Without it a fresh install logs to `/run` and loses everything on reboot — precisely when the logs are worth having. `tmpfiles.d/myosi.conf` therefore creates it explicitly. If you hit a package that misbehaves only on a fresh install and works after you `mkdir` something under `/var`, this is the reason.
+
+
 `/var` and `/home` are the two top-level subvolumes of the same encrypted btrfs filesystem on `data-luks`. Nested paths (`/var/tmp`, `/var/cache`, `/var/log`, `/var/lib/containers`, `/var/lib/libvirt`, `/var/lib/incus`) live as regular dirs inside the `/var` subvolume (no per-path subvol mount).
 
 Reference: `btrfs(8)`, `cryptsetup(8)`, `crypttab(5)`.
