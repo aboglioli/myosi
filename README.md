@@ -79,7 +79,7 @@ Slot sizes are pinned (`SizeMinBytes=SizeMaxBytes`) so systemd-repart's build an
 | `myosi_VERSION_ARCH_<VERITY_UUID>.verity.raw.zst` | Verity hash partition for sysupdate. UUID is the LAST 16 bytes of the root hash. Same `@u` mechanism. |
 | `myosi_VERSION_ARCH.verity-sig.raw.zst` | Verity signature partition |
 | `containers_VERSION_ARCH.raw` | Sysext: Podman, Distrobox, Compose, Skopeo, Incus + container-selinux baked into base policy |
-| `desktop_VERSION_ARCH.raw` | Sysext: Niri, fonts, audio, apps |
+| `desktop_VERSION_ARCH.raw` | Sysext: Niri, audio, apps. Lists no font packages — the user installs fonts into `~/.local/share/fonts` (`myenv install-fonts`); only GTK's dependency fonts come along as a fallback. |
 | `virt_VERSION_ARCH.raw` | Sysext: libvirt, qemu, vfio, virt-manager |
 | `nvidia_VERSION_ARCH.raw` | Sysext: NVIDIA `current` (595.x open kernel modules, Turing+ — RTX 16xx/20xx/30xx/40xx/50xx). All `nvidia*.ko` signed with `boot.key`. |
 | `nvidia-580xx_VERSION_ARCH.raw` | Sysext: NVIDIA `580xx` legacy proprietary modules (Maxwell / Pascal / Volta — GTX 9xx/10xx, Titan V). All `nvidia*.ko` signed with `boot.key`. |
@@ -1308,7 +1308,7 @@ Enable the features this host needs:
 ```bash
 sudo myosi extension-enable containers     # podman, distrobox, skopeo, incus
 sudo myosi extension-enable virt           # libvirt, qemu, vfio, virt-manager
-sudo myosi extension-enable desktop        # niri, terminals, waybar, pipewire, fonts, mesa
+sudo myosi extension-enable desktop        # niri, terminals, waybar, pipewire, mesa
 sudo myosi extension-enable zfs            # OpenZFS module + userspace
 ```
 
