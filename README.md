@@ -1106,8 +1106,11 @@ present, which is the typical correlate.
 
 Two paths kept out of /home so homed-managed homes stay lean:
 
-- **Steam library** lives at `/var/games/steam` (pre-created by
-  `tmpfiles.d/myosi.conf`, owned by `user`). In Steam: Settings →
+- **Steam library** lives at `/var/games/steam`. Create it yourself —
+  `sudo mkdir -p /var/games/steam && sudo chown $USER: /var/games/steam`.
+  tmpfiles no longer pre-creates `/var/games`: it only made an empty
+  root-owned parent, and the per-user subdirectory always had to be made
+  and chowned by hand anyway. In Steam: Settings →
   Storage → Add Library Folder → `/var/games/steam`, mark as default
   for new installs. Game configs and save data stay in
   `~/.steam/steam/userdata/` (small).
@@ -2087,28 +2090,35 @@ The image ships exactly one known credential, it is unusable remotely, and step 
 
 ### Container storage layout
 
-Root keeps the upstream defaults; only rootless users are relocated.
+**The image ships no containers configuration at all.** podman runs on its packaged defaults; the only per-host piece is one file in each user's home, provided by `myenv`.
 
-| | graphroot | runroot |
-|---|---|---|
-| root | `/var/lib/containers/storage` (stock) | `/run/containers/storage` (stock) |
-| rootless `<uid>` | `/var/lib/containers/users/<uid>` | `$XDG_RUNTIME_DIR/containers` |
-
-Rootless storage is moved out of `$HOME` because homed's idmapped mount maps only the user's own UID — subuid (100000+) writes inside the LUKS home fail `lchown` with `EOVERFLOW`. Keeping it on `/var` also means lingering user quadlets can start before the home is unlocked, and the home stays small.
-
-Both come from one file, `/usr/share/containers/storage.conf`:
+| | graphroot | runroot | comes from |
+|---|---|---|---|
+| root | `/var/lib/containers/storage` | `/run/containers/storage` | podman defaults |
+| rootless `<uid>` | `/var/lib/containers/users/<uid>` | `$XDG_RUNTIME_DIR/containers` | `~/.config/containers/storage.conf` |
 
 ```toml
-graphroot             = "/var/lib/containers/storage"
-rootless_storage_path = "/var/lib/containers/users/$UID"
+# ~/.config/containers/storage.conf — myenv, linked by `myenv setup-config`
+[storage]
+graphroot = "/var/lib/containers/users/$UID"
 ```
 
-Two behaviours of `containers/storage` are worth knowing, because neither is obvious and both bite:
+Rootless storage is moved out of `$HOME` because homed's idmapped mount maps only the user's own UID — subuid (100000+) writes inside the LUKS home fail `lchown` with `EOVERFLOW` — and because image layers would otherwise grow the encrypted home. `tmpfiles.d` creates `/var/lib/containers/users` `1777` so each user can make its own subdirectory; that line is the only container-related thing the image still ships.
 
-- **`graphroot` must stay set.** Dropping it does not "let rootless win" — with `graphroot` empty, `rootless_storage_path` is used for *every* UID, so rootful root silently lands in `users/0` and whatever is in the real graphroot is orphaned. Setting `graphroot` does not affect rootless users: the rootless options are built in a fresh struct that never copies it.
-- **`[storage.options]` is root-only.** The rootless path discards all graph-driver options, so `mountopt` and `additionalimagestores` apply to root's store alone. `[storage.options.pull_options]` is the exception and does reach rootless — which is why `enable_partial_images` (zstd:chunked partial pulls) is set there.
+Why per-user rather than a system-wide `rootless_storage_path`, which is the obvious approach:
 
-`mountopt` is plain `nodev`. `metacopy=on` forces `Native Overlay Diff` off, which pushes every build/commit/push onto the slower naive-diff path; building is the rootful workload here, so the trade goes the other way.
+- **Scope leakage.** With `rootless_storage_path` set and `graphroot` unset, podman 5.8.4 applies the rootless path to *root* as well, expanding `$UID` to `0` — rootful podman silently lands in `users/0` and orphans the real graphroot. Adding `graphroot` fixes that on 5.8.4, but the podman 6 in mybox reportedly breaks rootless outright when a system config sets `graphroot`. Either way the correct file is version-dependent.
+- **A user-scope config is not.** Each scope reads an explicit value and nothing is inferred, so the same pair works across podman generations. `$UID` does expand in a user-scope file, so one file serves every host and user.
+- **Nothing is lost by living in the home.** Rootless podman cannot run without `$HOME` anyway — it fails with `cannot resolve <home>` — so a locked homed home already rules it out, config file or not.
+
+The cost is real and worth stating: on podman 5.8.4 a user without that file silently stores images in `$HOME/.local/share/containers/storage`, which is exactly what this avoids. On podman 6 it is worse than silent — measured on 6.1.0, a rootless user with no user-scope file inherits the *system* `graphroot` and `runroot`, i.e. `/var/lib/containers/storage` and `/run/containers/storage`, both `0700 root`, and podman fails outright. Since Fedora's vendor `storage.conf` does set `graphroot`, the myenv file stops being an optimisation and becomes what keeps rootless podman working. Worth re-checking when the F45/podman 6 rebase lands, since it implies stock Fedora must drop `graphroot` from that file.
+
+Two podman behaviours that shaped this, both measured:
+
+- **`/usr/share/containers/containers.conf.d/` is not read.** podman's drop-in tiers are `/etc/containers/containers.conf.d/` and `~/.config/containers/containers.conf` — a file under `/usr/share` is silently ignored. `storage.conf` *does* have a `/usr/share` tier; `containers.conf` has a `/usr/share` file but no `/usr/share` drop-in directory. Anything that needs a `containers.conf` setting must go to `/etc` or the user's home.
+- **`[storage.options]` is root-only.** The rootless code path discards every graph-driver option, so `mountopt` and `additionalimagestores` never apply to a rootless store. `[storage.options.pull_options]` is the sole exception.
+
+Defaults inherited by dropping our config: `driver = overlay` (autodetected as overlay on btrfs even with the key absent), `mountopt = nodev,metacopy=on` from Fedora's vendor file — which costs `Native Overlay Diff` — `init = false`, and `compression_format = gzip`. The first is harmless; the rest are the price of carrying no configuration.
 
 **`/var/lib/containers` is deliberately *not* NoCOW.** `nodatacow` implies `nodatasum`, so scrub cannot verify a single byte of it, and it disables compression — measured on a host that had `+C` set: 8.7 G of layers at 0% compression, while the rootless store, which never inherited the flag, compresses 41% (432 M → 178 M). btrfs scopes `nodatacow` to frequent-overwrite workloads (databases, VM images); image layers are written once and read many times. No distribution's packaging sets `+C` here — the only upstream NoCOW policy is systemd's on `/var/log/journal`, and its own comment justifies that by journal files carrying internal checksums, which layer files do not. `/var/lib/libvirt` and `/var/lib/incus` keep `+C`: VM disk images are precisely the documented case.
 
@@ -2182,7 +2192,6 @@ max-zram-size = 16384     # capped at 16 GiB
 | `/usr/lib/modprobe.d/kvm.conf` | `kvm halt_poll_ns=400000` — VM latency |
 | `/etc/security/limits.d/memlock.conf` | 2GB memlock (PipeWire, Wine, containers) |
 | `/etc/systemd/system.conf.d/10-timeout.conf` | `DefaultTimeoutStopSec=15s` — fast shutdown |
-| `/etc/containers/containers.conf` | crun + sqlite + zstd:chunked + journald + **pasta** for rootless net |
 | `/etc/profile.d/editor.sh` | `EDITOR=VISUAL=nvim` |
 | `/etc/profile.d/gpg.sh` | `GPG_TTY` for ssh / tty agent |
 
@@ -2382,7 +2391,7 @@ zram is always-on. Swap pages go to zstd-compressed RAM, not disk. Aggressive sw
 A slim signed base + per-host opt-in sysexts means every host runs the same updateable artifact. Per-host images multiply the update + signing surface. Host identity lives in the persistent `/etc` btrfs subvol on `data-luks`; reusable signed configuration ships as additional sysexts under `/usr`.
 
 **Why pasta instead of slirp4netns for rootless podman?**
-slirp4netns works but is slow, IPv6-limited, and the legacy default. pasta (passt) is faster (kernel-based packet shuttling), has full IPv6 support, and is the default in podman 5.x+. Configured via `default_rootless_network_cmd = "pasta"` in `/etc/containers/containers.conf`. myos uses slirp4netns — myosi deliberately diverges.
+slirp4netns works but is slow, IPv6-limited, and the legacy default. pasta (passt) is faster (kernel-based packet shuttling), has full IPv6 support, and is already podman's default from 5.x on — myosi configures nothing and gets it. myos pins slirp4netns; podman 6 removes it entirely.
 
 **Why is `/etc` writable when the rest of the root is RO?**
 systemd-sysusers, systemd-machine-id-commit, sshd-keygen, NetworkManager, and password changes need writable `/etc` at runtime. myosi gets that from an overlay whose upper is a btrfs subvolume on `data-luks`: writes land in `/.etc/etc`, everything else is read straight from the verity-baked factory tree. Host-owned config should still prefer signed sysexts; local `/etc` edits are for machine-local state and emergency overrides.
