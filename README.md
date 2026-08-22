@@ -464,6 +464,55 @@ sudo /usr/lib/systemd/system-generators/podman-system-generator /tmp/g /tmp/g /t
 find /tmp/g
 ```
 
+### Containers on the LAN need `netavark-dhcp-proxy.socket`
+
+A macvlan or ipvlan container — one meant to be its own host on the LAN
+rather than sit behind podman's NAT — gets its address from
+`netavark-dhcp-proxy`, a socket-activated helper listening on
+`/run/podman/nv-proxy.sock`. Without it the container never starts:
+
+```
+netavark: unable to obtain lease: socket "/run/podman/nv-proxy.sock":
+          No such file or directory, is the netavark-dhcp-proxy.socket unit enabled?
+```
+
+The containers profile now `Upholds=` it alongside `podman.socket` and
+`incus.socket`. Previously it was left to a manual `systemctl enable` per
+host, which left the only record of it in that host's `/etc` overlay
+upper — undeclared, missing on a fresh install, and silently dropped by
+an `/etc` factory reset.
+
+**The error message can lie, and this is worth knowing before you chase
+it.** Unlinking a unix socket's path does not close the file descriptor
+systemd is listening on. If anything removes `/run/podman/nv-proxy.sock`
+while the unit is up, systemd keeps reporting the unit perfectly healthy —
+
+```
+is-enabled: enabled    is-active: active    SubState: listening
+Listen:     /run/podman/nv-proxy.sock (Stream)
+```
+
+— while the path is simply gone and every netavark DHCP request gets
+`ENOENT`. So the error tells you to check whether the unit is enabled,
+you check, it *is* enabled, and you are no wiser.
+
+The two states disagree in both directions, so check them together rather
+than trusting either alone — `systemctl stop` leaves the socket file on
+disk, so a present file does not mean anything is listening:
+
+```bash
+systemctl is-active netavark-dhcp-proxy.socket && test -S /run/podman/nv-proxy.sock \
+  || sudo systemctl restart netavark-dhcp-proxy.socket
+```
+
+Observed once on a running host; the culprit was not identified. Ruled
+out by testing: the boot-time `D! /run/podman` line in podman's
+`tmpfiles.d` (it runs before the socket unit starts), the proxy's own
+idle exit (`-a 30`; the socket survives it), `RuntimeDirectory=` cleanup
+(no podman unit declares one), and `podman system refresh` (forced one
+by clearing `/run/libpod/alive`; the socket survived). Restarting the
+socket unit is the fix whenever it happens.
+
 ### Versioned artifact paths
 
 | Where | Convention |
