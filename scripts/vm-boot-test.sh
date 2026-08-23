@@ -66,7 +66,18 @@ else
     CODE=$(find_fw /usr/share/OVMF/OVMF_CODE_4M.fd \
                    /usr/share/edk2/ovmf/OVMF_CODE.fd)
 fi
-VARS_TMPL=$(find_fw /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/edk2/ovmf/OVMF_VARS.fd)
+if [ -n "$SB_CERT" ]; then
+    # Must be the Secure Boot vars template, not the blank one. Enrolling
+    # into the blank store produces a db that OVMF ignores: the firmware
+    # rejects the UKI with "Access Denied -- rejected probably by Secure
+    # Boot" and falls through to PXE. Verified both ways on the same image.
+    # Our cert is appended to the vendor keys this template already holds.
+    VARS_TMPL=$(find_fw /usr/share/OVMF/OVMF_VARS_4M.ms.fd \
+                        /usr/share/edk2/ovmf/OVMF_VARS.secboot.fd)
+else
+    VARS_TMPL=$(find_fw /usr/share/OVMF/OVMF_VARS_4M.fd \
+                        /usr/share/edk2/ovmf/OVMF_VARS.fd)
+fi
 [ -n "${CODE:-}" ] && [ -n "${VARS_TMPL:-}" ] || { echo "no OVMF firmware found" >&2; exit 1; }
 VARS="$WORK/vars.fd"
 if [ -n "$SB_CERT" ]; then
