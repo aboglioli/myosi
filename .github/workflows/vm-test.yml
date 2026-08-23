@@ -1,0 +1,104 @@
+# Boot the released image on an empty disk and assert the result.
+#
+# Deliberately NOT on every push: the artifact only exists after a build,
+# and a first-boot test costs minutes that a docs change should not pay.
+# It runs when a release is published (the artifact it tests) and on
+# demand for any tag.
+name: vm-test
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to boot (defaults to latest)"
+        required: false
+        type: string
+      secure_boot:
+        description: Enroll our keys and boot with Secure Boot
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  vm-test:
+    name: First boot (fresh disk)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Enable KVM
+        # Hardware acceleration is available on standard hosted Linux
+        # runners, but /dev/kvm is not world-accessible by default. Without
+        # this the run falls back to TCG and takes several times longer
+        # (vm-boot-test.sh detects that and extends its own timeout).
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -r /dev/kvm && echo "kvm available" || echo "kvm NOT available — will use TCG"
+
+      - name: Install VM tooling
+        # vhost_vsock backs the SSH control channel; socat speaks
+        # VSOCK-CONNECT for the ssh ProxyCommand; virt-firmware enrolls
+        # Secure Boot keys without the interactive OVMF menu.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils ovmf swtpm socat python3-virt-firmware zstd
+          sudo modprobe vhost_vsock
+
+      - name: Free disk space
+        # The raw image plus its qcow2 do not fit alongside the runner's
+        # preinstalled toolchains.
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/hostedtoolcache /usr/share/dotnet
+          df -h / | tail -1
+
+      - name: Decode Secure Boot certificate
+        if: ${{ github.event_name == 'release' || inputs.secure_boot }}
+        env:
+          MYOSI_BOOT_CRT: ${{ secrets.MYOSI_BOOT_CRT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MYOSI_BOOT_CRT:-}" ]; then
+            echo "MYOSI_BOOT_CRT not set — falling back to a non-Secure-Boot run" >&2
+            exit 0
+          fi
+          mkdir -p keys
+          printf '%s' "$MYOSI_BOOT_CRT" | base64 -d > keys/boot.crt
+          chmod 644 keys/boot.crt
+          echo "SB_CERT=keys/boot.crt" >> "$GITHUB_ENV"
+
+      - name: Download the image under test
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          [ -n "$TAG" ] || TAG="${{ github.event.release.tag_name }}"
+          [ -n "$TAG" ] || TAG=$(gh release view --json tagName --jq .tagName)
+          echo "testing $TAG"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          gh release download "$TAG" --pattern 'myosi_*_x86-64.raw.zst' --clobber
+          ls -l myosi_*_x86-64.raw.zst
+
+      - name: Boot and assert
+        run: ./scripts/vm-boot-test.sh myosi_*_x86-64.raw.zst build/vm-test
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vm-test-logs-${{ env.TAG }}
+          path: |
+            build/vm-test/console.log
+            build/vm-test/guest-journal.log
+          if-no-files-found: warn
+          retention-days: 14

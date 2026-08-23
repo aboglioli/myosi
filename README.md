@@ -2140,6 +2140,46 @@ The image ships exactly one known credential, it is unusable remotely, and step 
 **Rootless podman:** `/etc/subuid` + `/etc/subgid` bake only the static image-owned identities — `root` at `1500000:200000`, `containers` at `2000000:1000000`. The interactive user is **not** baked (the image ships none, and the name is per-host); `myosi-homed-user@<name>` allocates it the first free `1000000`-wide gap at or above `100000` on provisioning.
 
 
+### Automated first-boot test
+
+`scripts/vm-boot-test.sh <image.raw.zst>` boots an image on an empty disk
+and asserts the result, unattended. The `vm-test` workflow runs it when a
+release is published, or on demand for any tag.
+
+It exists because an upgraded host cannot answer the questions that matter
+here. Directories and SELinux labels persist in `/var` from whatever image
+created them, so a running host will happily show you a correct label that
+nothing in the *current* tmpfiles.d would produce. Only a disk that has
+never booted before tells the truth, and every run starts from a fresh
+qcow2 built from the image.
+
+The control channel is SSH over `AF_VSOCK`, not the console. The image
+already ships `systemd-ssh-generator`, and `tmpfiles.d/myosi.conf` already
+consumes the `ssh.authorized_keys.root` system credential, so QEMU hands
+the VM a throwaway public key at launch via SMBIOS type 11 and the script
+gets a real shell — no console scraping, no image changes:
+
+```
+-smbios type=11,value=io.systemd.credential.binary:ssh.authorized_keys.root=<base64>
+-device vhost-vsock-pci,guest-cid=<cid>
+```
+
+Reaching vsock from ssh needs either `socat` (what CI installs) or
+`systemd-ssh-proxy` (already on any myosi host, and it needs
+`ProxyUseFdpass=yes` because it passes a descriptor rather than a stream).
+
+`scripts/vm-test-assertions.sh` runs inside the guest and checks SELinux
+enforcement and a zero AVC count, the label on every path whose `t` line
+was removed, the tmpfiles outcomes including the persistent journal and
+the entries that should now be absent, the NoCOW policy, the mounts, and
+the podman storage split. `systemd-tpm2-setup.service` is allowlisted as a
+known first-boot failure so the job reports regressions rather than a
+standing red.
+
+Locally: `SB_CERT=keys/boot.crt ./scripts/vm-boot-test.sh build/myosi_*.raw.zst`
+enrolls the signing cert as PK/KEK/db with `virt-fw-vars` and boots with
+Secure Boot; without `SB_CERT` it boots unsigned. `KEEP=1` leaves the VM up.
+
 ### Container storage layout
 
 **The image ships no containers configuration at all.** podman runs on its packaged defaults; the only per-host piece is one file in each user's home, provided by `myenv`.
