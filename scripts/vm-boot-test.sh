@@ -95,6 +95,14 @@ CRED=$(base64 -w0 < "$WORK/id.pub")
 echo "  throwaway key generated, vsock CID $CID"
 
 say "boot"
+# Fail here with a sentence rather than inside qemu's device setup. A myosi
+# host ships /dev/vhost-vsock 0666; a stock runner leaves it root-only.
+if [ ! -w /dev/vhost-vsock ]; then
+    echo "  /dev/vhost-vsock is not writable by $(id -un) — the vsock control" >&2
+    echo "  channel cannot open. Load vhost_vsock and relax the node:" >&2
+    echo "      sudo modprobe vhost_vsock && sudo chmod 0666 /dev/vhost-vsock" >&2
+    exit 1
+fi
 ACCEL="-accel tcg -cpu max"; TMO=${BOOT_TIMEOUT:-900}
 if [ -r /dev/kvm ]; then ACCEL="-accel kvm -cpu host"; TMO=${BOOT_TIMEOUT:-300}; fi
 echo "  ${ACCEL#-accel }, timeout ${TMO}s"
