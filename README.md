@@ -2158,11 +2158,19 @@ sudo systemctl enable --now myosi-homed-user@alice.service  # workstation
 Creating the same name in both modes is refused, in either order — a classic
 account over a homed one shadows a home the operator can no longer reach.
 
-The homed home is 50 GiB, as before — that is what any host with more than
-about 62 GiB free on `/home` gets. The only change is that it now shrinks to
-80% of free space when 50 GiB genuinely does not fit, because an unclamped
-request simply fails `homectl` on a small pool. `MYOSI_HOME_DISK_SIZE`
-overrides it.
+The homed home is sized from free space: **a third of what is free on
+`/home`, capped at 50 GiB**. The third puts the cap exactly at 150 GiB free,
+so any host with that much or more gets the full 50 GiB and smaller pools get
+a home proportional to what they have. A flat 50 GiB is not an option — on a
+small pool `homectl` refuses the request outright. `MYOSI_HOME_DISK_SIZE`
+overrides the calculation.
+
+| free on `/home` | home |
+|---|---|
+| 20 GiB | 6.7 GiB |
+| 60 GiB | 20 GiB |
+| 100 GiB | 33 GiB |
+| 150 GiB and up | 50 GiB |
 
 ---
 

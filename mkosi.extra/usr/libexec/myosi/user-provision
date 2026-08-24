@@ -113,21 +113,21 @@ create_homed() {
     # image that is already too small.
     local size=$HOME_DISK_SIZE
     if [ -z "$size" ]; then
-        # 50 GiB is the intent and what essentially every host ends up with;
-        # it only shrinks when that genuinely does not fit. Sizing it as a
-        # fraction of free space instead would quietly hand a 100 GiB pool a
-        # 25 GiB home, which is a worse default than the constant it replaced.
+        # A third of what is free on /home, capped at 50 GiB. The third is
+        # chosen so the cap is reached at 150 GiB free: any host with that
+        # much or more gets the full 50 GiB, and smaller pools get a home
+        # proportional to what they actually have.
         #
-        # The clamp is not belt-and-braces: measured on a first-boot VM with
-        # 6.7 GiB free on /home, an unclamped request fails homectl outright —
-        # exactly the small-pool case a server hits. 80% leaves room for the
-        # rest of /home and for the LUKS image to grow into.
-        local avail headroom
+        # Sizing has to track free space rather than be a constant: measured
+        # on a first-boot VM with 6.7 GiB free, a flat 50 GiB request fails
+        # homectl outright, which is the small-server case. A third also
+        # leaves the rest of /home usable — the home is a LUKS image that
+        # grows, not a reservation.
+        local avail
         avail=$(df -B1 --output=avail /home 2>/dev/null | tail -1 | tr -dc '0-9')
         avail=${avail:-0}
-        size=$((50 * 1024 ** 3))
-        headroom=$(( avail * 80 / 100 ))
-        [ "$size" -gt "$headroom" ] && size=$headroom
+        size=$(( avail / 3 ))
+        [ "$size" -gt $((50 * 1024 ** 3)) ] && size=$((50 * 1024 ** 3))
     fi
     echo "user-provision: creating homed record for '$NAME' from $IDENTITY (${size} bytes)" >&2
     PASSWORD="$BOOTSTRAP_PASSWORD" NEWPASSWORD="$BOOTSTRAP_PASSWORD" \
