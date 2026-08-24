@@ -51,7 +51,7 @@ jobs:
       - name: Lint shell scripts
         run: |
           # Select by shebang, not by extension. Every script that runs on a
-          # host at boot is extensionless (homed-user-provision, sysext-select,
+          # host at boot is extensionless (user-provision, sysext-select,
           # data-attach, the myosi CLI, every sub-image mkosi.postinst), so an
           # `*.sh` glob covered 4 files and missed 16 — including all of them.
           mapfile -t files < <(

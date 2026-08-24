@@ -154,7 +154,7 @@ files referenced; this is the operator/contributor map.
 | `/etc/extensions/`, `/run/extensions/` | Additional sysext discovery paths (rare). | Operator-mutable. |
 | `/srv`, `/mnt` → `var/mnt` | `/srv` is a dedicated btrfs subvolume from `data-luks`; `/mnt` is symlinked into writable `/var`. | `/srv` and `/mnt` targets are operator-mutable. |
 | `/var/lib/machines/` | Per-machine btrfs subvolumes for `systemd-nspawn` containers managed by `machinectl`. | Operator-mutable. |
-| `/usr/libexec/myosi/` | Shipped helper scripts (`sysext-modules-refresh`, `homed-user-provision`, `sysext-select`, `install`, `lib.sh`). | Image-coupled. |
+| `/usr/libexec/myosi/` | Shipped helper scripts (`sysext-modules-refresh`, `user-provision`, `sysext-select`, `install`, `lib.sh`). | Image-coupled. |
 
 ### systemd-sysext discovery, multi-version merge, and baselines
 
@@ -383,7 +383,7 @@ decoupled — no base-image edits needed when adding a new sysext):
    when merged, absent otherwise. The base image ships nothing in
    this directory.
 
-3. `/usr/libexec/myosi/homed-user-provision` (phase 2) reads every
+3. `/usr/libexec/myosi/user-provision` (phase 2) reads every
    `*.conf` in that drop-in directory, dedups the requested group
    names, and for each one currently present in NSS calls
    `gpasswd -a <user> <group>`. The membership lands in
@@ -611,10 +611,12 @@ on this layout. Generic summary so you know what to look for:
   (ExecStartPost to re-run sysext-modules-refresh / sysusers / binfmt /
   sysctl / tmpfiles after a sysext merge so the sysext-shipped
   config drops are processed).
-- `myosi-homed-user@.service` is a templated oneshot that runs
-  `/usr/libexec/myosi/homed-user-provision %i` to create the homed
-  record from `/usr/share/myosi/users/<name>.user` and bind the user
-  to active sysext groups. Decoupled from `systemd-homed.service`
+- `myosi-homed-user@.service` and `myosi-user@.service` are templated
+  oneshots that both run `/usr/libexec/myosi/user-provision %i` — the first
+  with `--storage=homed`, the second `--storage=classic` — to create the
+  account from `/usr/share/myosi/users/<name>.user` and bind the user to
+  active sysext groups. See
+  [Choosing a user storage mode](#choosing-a-user-storage-mode). Decoupled from `systemd-homed.service`
   ExecStartPost (Type=notify on homed used to mask provisioning
   failures because READY=1 fires before ExecStartPost runs). **No
   instance is enabled by default** — the image ships no interactive user
@@ -868,7 +870,7 @@ record ships as a declarative JSON file at
 `/usr/share/myosi/users/<name>.user` (UID, shell, supplementary
 groups, hashed password — NO secret/storage/diskSize, those are CLI
 flags). `myosi-homed-user@<name>.service` runs
-`/usr/libexec/myosi/homed-user-provision <name>` on first boot,
+`/usr/libexec/myosi/user-provision --storage=homed <name>` on first boot,
 which calls `homectl create --identity=<file> --storage=luks
 --disk-size=50G --luks-discard=yes --luks-offline-discard=no
 --auto-resize-mode=grow --luks-extra-mount-options=defcontext=...` with the
@@ -980,7 +982,7 @@ line at deactivation on a record that already reports
 2. `systemd-homed.service` starts. **No user is provisioned** —
    `myosi-homed-user@.service` ships disabled, so nothing calls
    `homectl create`. (On images that pre-bake an identity via a private
-   overlay, the enabled `@<name>` instance runs `homed-user-provision
+   overlay, the enabled `@<name>` instance runs `user-provision
    <name>` here, seeding the LUKS keyslot from the `MYOSI_BOOTSTRAP_PASSWORD`
    env default via `PASSWORD`/`NEWPASSWORD`.)
 3. Operator logs in at the console as `root` / `changeme`, runs
@@ -2108,6 +2110,59 @@ Only `/var`, `/home`, and persistent `/etc` are unique host state. The signed ro
 | TPM2 unlock fails after firmware/SecureBoot change | Boot with the passphrase fallback, then `sudo systemd-cryptenroll --wipe-slot=tpm2 --tpm2-device=auto --tpm2-pcrs=7+14 /dev/disk/by-partlabel/data-luks` (re-enrolls TPM2 with current PCR values). |
 | Failed data disk in btrfs pool | Use the profile-specific btrfs recovery path: `raid1`/`raid10` can be replaced, `raid0` normally requires restore from backup. |
 | Lost boot disk but data disks intact | Reinstall base to a new boot disk, unlock/mount existing data pools, restore `/var`/`home` mappings, then re-enable required sysexts with `sudo myosi extension-enable`. |
+
+---
+
+## Choosing a user storage mode
+
+Two provisioners, one implementation. `myosi-homed-user@<name>.service`
+creates a systemd-homed record with a per-user LUKS home;
+`myosi-user@<name>.service` creates an ordinary `/etc/passwd` account with a
+plain home on the `/home` subvolume and **enables linger**. Both read the same
+`/usr/share/myosi/users/<name>.user` identity file, and everything after
+account creation — sysext group binding, subuid/subgid allocation — is the
+same code, so the two cannot drift.
+
+| | homed | classic |
+|---|---|---|
+| home encryption | per-user LUKS, opaque to root while locked | pool LUKS only (`data-luks`) |
+| unlocks | on authentication | already there at boot |
+| TPM2 auto-unlock | **no** — `homectl` has no `--tpm2-device` | yes, via the pool's LUKS |
+| lingering user units | start with **no accessible `$HOME`** | work normally |
+| rootless quadlets at boot | **cannot work** | work |
+| use it for | interactive workstations | servers, headless hosts |
+
+**Pick classic for anything nobody logs into.** A homed home is unlocked *by
+authentication*, and there is no TPM2 path, so on a headless host it never
+unlocks. That is not a tuning problem:
+
+- rootless podman refuses to start at all without `$HOME` — it fails with
+  `cannot resolve <home>`;
+- a user quadlet generator runs before any mount, so
+  `~/.config/containers/systemd/` is empty at boot and the units in it are
+  never generated.
+
+So a headless host running rootless quadlets cannot use homed. And it gives up
+less than it looks: `/home` is a subvolume inside the `data-luks` partition, so
+a classic home is still encrypted at rest. What homed adds is separation from
+*other users and from root*, which is the point on a shared laptop and close to
+worthless on a single-admin server.
+
+Neither instance is enabled by default; the image ships no interactive user.
+
+```bash
+sudo systemctl enable --now myosi-user@alice.service        # server
+sudo systemctl enable --now myosi-homed-user@alice.service  # workstation
+```
+
+Creating the same name in both modes is refused, in either order — a classic
+account over a homed one shadows a home the operator can no longer reach.
+
+The homed home is 50 GiB, as before — that is what any host with more than
+about 62 GiB free on `/home` gets. The only change is that it now shrinks to
+80% of free space when 50 GiB genuinely does not fit, because an unclamped
+request simply fails `homectl` on a small pool. `MYOSI_HOME_DISK_SIZE`
+overrides it.
 
 ---
 

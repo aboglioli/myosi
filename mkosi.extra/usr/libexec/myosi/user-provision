@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# Provision a myosi user in one of two storage modes, then apply everything
+# that is identical either way: sysext group binding and subuid/subgid.
+#
+#   --storage=homed    systemd-homed record with a per-user LUKS home.
+#                      For interactive workstations.
+#   --storage=classic  ordinary /etc/passwd user, plain home on the /home
+#                      subvolume, linger enabled. For servers and headless
+#                      hosts.
+#
+# Why the second mode exists. A homed home is unlocked BY AUTHENTICATION and
+# homed has no TPM2 support, so on a host nobody logs into it never unlocks.
+# Rootless podman cannot start without $HOME at all ("cannot resolve <home>"),
+# and a user quadlet generator runs before any mount, so
+# ~/.config/containers/systemd is empty at boot. A headless host running
+# rootless quadlets therefore cannot use homed. /home already lives inside the
+# data-luks pool, so a classic home is still encrypted at rest; what it gives
+# up is per-user separation from other users and from root, which is worth
+# little on a single-admin box and is the whole point on a shared laptop.
+#
+# One script for both so the halves after account creation cannot drift.
+# Runs as myosi-homed-user@<name>.service or myosi-user@<name>.service, and
+# again after a live sysext refresh. Idempotent.
+#
+# Only creation needs an identity file — groups and subids are applied to any
+# existing user, so a user made by hand is covered too.
+#
+# Not homed's ExecStartPost: homed is Type=notify and signals READY=1 first,
+# which would mask failures here.
+
+set -euo pipefail
+
+STORAGE=homed
+NAME=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --storage=*) STORAGE=${1#--storage=} ;;
+        -*)          echo "user-provision: unknown option $1" >&2; exit 2 ;;
+        *)           NAME=$1 ;;
+    esac
+    shift
+done
+: "${NAME:?usage: user-provision [--storage=homed|classic] <username>}"
+case "$STORAGE" in
+    homed|classic) ;;
+    *) echo "user-provision: --storage must be homed or classic, got '$STORAGE'" >&2; exit 2 ;;
+esac
+
+DROP_DIR=/usr/share/myosi/user-groups.d
+BOOTSTRAP_PASSWORD="${MYOSI_BOOTSTRAP_PASSWORD:-changeme}"
+# 50 GiB was a workstation default. A server pool is often smaller than the
+# home it would carve out, so cap at a quarter of the free space unless the
+# operator says otherwise.
+HOME_DISK_SIZE="${MYOSI_HOME_DISK_SIZE:-}"
+
+# /etc first: operator-writable and survives A/B updates, unlike baked /usr.
+IDENTITY=
+for candidate in "/etc/myosi/users/${NAME}.user" "/usr/share/myosi/users/${NAME}.user"; do
+    if [ -f "$candidate" ]; then
+        IDENTITY="$candidate"
+        break
+    fi
+done
+
+ident() { [ -n "$IDENTITY" ] && jq -r "$1 // empty" "$IDENTITY" 2>/dev/null || true; }
+
+is_homed() { homectl inspect "$1" >/dev/null 2>&1; }
+exists()   { getent passwd "$1" >/dev/null 2>&1; }
+
+RECORD_UID=$(ident '.uid')
+if [ -n "$RECORD_UID" ] && ! is_homed "$NAME"; then
+    # No pipeline: getent exits 2 on an unused uid, and pipefail turned that
+    # into an abort before the user was ever created.
+    EXISTING=
+    if passwd_entry=$(getent passwd "$RECORD_UID" 2>/dev/null); then
+        EXISTING=${passwd_entry%%:*}
+    fi
+    if [ -n "$EXISTING" ] && [ "$EXISTING" != "$NAME" ]; then
+        # Retarget rather than bail, or a host with its own primary user never
+        # gets groups bound. Clearing IDENTITY skips creation: the uid is taken.
+        echo "user-provision: uid ${RECORD_UID} owned by '${EXISTING}', not '${NAME}' — binding groups to '${EXISTING}'" >&2
+        NAME="$EXISTING"
+        IDENTITY=
+    fi
+fi
+
+# Refuse to manage the same name in both modes. Creating a classic account
+# over a homed one shadows a home the operator cannot then reach, and the
+# reverse leaves two records disagreeing about the same uid.
+if [ "$STORAGE" = classic ] && is_homed "$NAME"; then
+    echo "user-provision: '$NAME' is a homed user — refusing to also create a classic account." >&2
+    echo "  Use myosi-homed-user@${NAME}.service, or remove the record with 'homectl remove ${NAME}'." >&2
+    exit 1
+fi
+if [ "$STORAGE" = homed ] && exists "$NAME" && ! is_homed "$NAME"; then
+    echo "user-provision: '$NAME' already exists as a classic user — refusing to create a homed record." >&2
+    echo "  Use myosi-user@${NAME}.service, or remove the account with 'userdel ${NAME}'." >&2
+    exit 1
+fi
+
+create_homed() {
+    # PASSWORD/NEWPASSWORD: homed 259 ignores --identity=' secret section (fixed
+    # in 260+); homectl honours these env vars instead.
+    # defcontext=: homectl doesn't label inside the LUKS image, and unlabeled_t
+    # makes SELinux deny sudo/sshd/keyring.
+    # --luks-offline-discard=no: skips the logout FITRIM. Online discard already
+    # reclaimed everything it would find.
+    # --auto-resize-mode=grow: the LUKS default is shrink-and-grow, which
+    # minimizes the whole stack on logout — a separate gate from the discard
+    # flags. homed SIGKILLs the worker 30 s into shutdown, and an interrupted
+    # shrink leaves btrfs small inside a full-size LUKS device that the next
+    # boot never regrows. `grow` keeps the login-time regrow, which repairs an
+    # image that is already too small.
+    local size=$HOME_DISK_SIZE
+    if [ -z "$size" ]; then
+        # 50 GiB is the intent and what essentially every host ends up with;
+        # it only shrinks when that genuinely does not fit. Sizing it as a
+        # fraction of free space instead would quietly hand a 100 GiB pool a
+        # 25 GiB home, which is a worse default than the constant it replaced.
+        #
+        # The clamp is not belt-and-braces: measured on a first-boot VM with
+        # 6.7 GiB free on /home, an unclamped request fails homectl outright —
+        # exactly the small-pool case a server hits. 80% leaves room for the
+        # rest of /home and for the LUKS image to grow into.
+        local avail headroom
+        avail=$(df -B1 --output=avail /home 2>/dev/null | tail -1 | tr -dc '0-9')
+        avail=${avail:-0}
+        size=$((50 * 1024 ** 3))
+        headroom=$(( avail * 80 / 100 ))
+        [ "$size" -gt "$headroom" ] && size=$headroom
+    fi
+    echo "user-provision: creating homed record for '$NAME' from $IDENTITY (${size} bytes)" >&2
+    PASSWORD="$BOOTSTRAP_PASSWORD" NEWPASSWORD="$BOOTSTRAP_PASSWORD" \
+        homectl create "$NAME" \
+            --identity="$IDENTITY" \
+            --storage=luks \
+            --disk-size="$size" \
+            --fs-type=btrfs \
+            --luks-discard=yes \
+            --luks-offline-discard=no \
+            --auto-resize-mode=grow \
+            --luks-extra-mount-options=defcontext=system_u:object_r:user_home_dir_t:s0 \
+            --password-hint="Default password: ${BOOTSTRAP_PASSWORD} — change with 'homectl passwd ${NAME}'"
+}
+
+create_classic() {
+    local home shell gecos gid
+    home=$(ident '.homeDirectory'); home=${home:-/home/$NAME}
+    shell=$(ident '.shell');        shell=${shell:-/bin/bash}
+    gecos=$(ident '.realName')
+    gid=$(ident '.gid')
+
+    # A shell the image does not ship leaves an account nobody can log into.
+    if [ ! -x "$shell" ]; then
+        echo "user-provision: shell '$shell' is not executable here, falling back to /bin/bash" >&2
+        shell=/bin/bash
+    fi
+
+    # -K SUB_*_COUNT=0 stops useradd allocating its own subid range from
+    # login.defs (Fedora: 524288 + 65536). Without it the classic mode ends up
+    # with a 65536-wide range while homed users get the 1000000-wide one this
+    # script allocates below, and subid_ensure would honour useradd's entry as
+    # "operator intent" and never correct it. Measured on a real first boot.
+    #
+    # useradd also warns "Creating mailbox file: No such file or directory"
+    # because myosi ships no /var/spool/mail. Harmless, exit stays 0, and
+    # -K CREATE_MAIL_SPOOL=no is not a valid key on this shadow build (it
+    # aborts useradd with exit 3), so the warning is left alone rather than
+    # silenced by hiding useradd's stderr.
+    local -a args=(-K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0
+                   --create-home --home-dir "$home" --shell "$shell")
+    [ -n "$gecos" ]      && args+=(--comment "$gecos")
+    [ -n "$RECORD_UID" ] && args+=(--uid "$RECORD_UID")
+    if [ -n "$gid" ]; then
+        getent group "$gid" >/dev/null 2>&1 || groupadd --gid "$gid" "$NAME"
+        args+=(--gid "$gid")
+    else
+        args+=(--user-group)
+    fi
+
+    echo "user-provision: creating classic user '$NAME' (home $home, shell $shell)" >&2
+    useradd "${args[@]}" "$NAME"
+    printf '%s:%s\n' "$NAME" "$BOOTSTRAP_PASSWORD" | chpasswd
+    # useradd creates the home before the account is known to the policy, so
+    # the tree can land user_home_t-less. Cheap to redo, fatal to skip.
+    command -v restorecon >/dev/null 2>&1 && restorecon -R "$home" >/dev/null 2>&1 || true
+
+    # memberOf is applied by homed itself in the other mode; useradd never
+    # reads the identity file, so do it here for the same end state.
+    local g
+    while read -r g; do
+        [ -n "$g" ] || continue
+        getent group "$g" >/dev/null 2>&1 || continue
+        gpasswd -a "$NAME" "$g" >/dev/null
+    done < <(ident '.memberOf[]')
+}
+
+if [ -n "$IDENTITY" ] && ! exists "$NAME"; then
+    case "$STORAGE" in
+        homed)   create_homed ;;
+        classic) create_classic ;;
+    esac
+fi
+
+if ! exists "$NAME"; then
+    if [ -n "$IDENTITY" ]; then
+        echo "user-provision: '$NAME' still absent after creation, not binding groups" >&2
+    else
+        echo "user-provision: no identity for '$NAME' and no such user — create it first, nothing to do" >&2
+    fi
+    exit 0
+fi
+
+# Scoped `if`, not `|| exit 0`: subid allocation below must still run on a host
+# whose sysexts declare no groups.
+if [ -d "$DROP_DIR" ]; then
+    declare -A wanted
+    shopt -s nullglob
+    for cfg in "$DROP_DIR"/*.conf; do
+        while IFS= read -r raw || [ -n "$raw" ]; do
+            stripped=${raw%%#*}
+            read -r group _ <<< "$stripped" || true
+            [ -n "${group:-}" ] || continue
+            wanted[$group]=1
+        done < "$cfg"
+    done
+
+    for group in "${!wanted[@]}"; do
+        # Missing means the declaring sysext's sysusers.d hasn't run; the next
+        # trigger retries.
+        if ! getent group "$group" >/dev/null 2>&1; then
+            continue
+        fi
+        # Pure-bash membership test; a grep -q pipeline can SIGPIPE under pipefail.
+        case " $(id -nG "$NAME" 2>/dev/null) " in
+            *" $group "*) ;;
+            *)
+                gpasswd -a "$NAME" "$group" >/dev/null
+                echo "user-provision: added ${NAME} to ${group}" >&2
+                ;;
+        esac
+    done
+fi
+
+# Rootless podman/distrobox/incus read subuid/subgid directly; a homed record
+# has no field feeding them and `usermod --add-subuids` refuses homed users.
+# useradd may already have allocated a range in classic mode — subid_ensure
+# returns early on any existing entry, so both paths converge.
+SUBID_COUNT=1000000
+SUBID_FLOOR=100000
+SUBID_CEILING=4294967295   # uid_t max
+
+subid_ensure() {
+    local file="$1"
+
+    if [ ! -e "$file" ]; then
+        : > "$file" || { echo "user-provision: cannot create $file" >&2; return 0; }
+        # restorecon warns on stdout, which would reach journal+console.
+        command -v restorecon >/dev/null 2>&1 && restorecon "$file" >/dev/null 2>&1 || true
+    fi
+
+    local -a ranges=()
+    local n s c
+    while IFS=: read -r n s c || [ -n "${n:-}" ]; do
+        # An existing entry wins whatever its size — operator intent.
+        if [ "${n:-}" = "$NAME" ]; then
+            return 0
+        fi
+        case "${s:-}${c:-}" in *[!0-9]*|"") continue ;; esac
+        [ "$c" -gt 0 ] || continue
+        ranges+=("$s $((s + c))")
+    done < "$file"
+
+    # Walk sorted ranges for the first gap instead of appending past the highest
+    # end: on a pre-existing file a custom `root:0:4294967295` would otherwise
+    # push the allocation off the id space.
+    local cand=$SUBID_FLOOR rs re
+    while read -r rs re; do
+        [ -n "${rs:-}" ] || continue
+        if [ $((cand + SUBID_COUNT)) -le "$rs" ]; then
+            break
+        fi
+        if [ "$re" -gt "$cand" ]; then
+            cand=$re
+        fi
+    done < <(printf '%s\n' "${ranges[@]:-}" | sort -n)
+
+    if [ "$cand" -gt $((SUBID_CEILING - SUBID_COUNT)) ]; then
+        echo "user-provision: no free ${SUBID_COUNT}-wide range in $file, leaving it to the operator" >&2
+        return 0
+    fi
+
+    # Non-fatal: groups are already bound, don't fail the unit over this.
+    if ! printf '%s:%s:%s\n' "$NAME" "$cand" "$SUBID_COUNT" >> "$file"; then
+        echo "user-provision: cannot write $file" >&2
+        return 0
+    fi
+    echo "user-provision: allocated ${file##*/} range ${cand}:${SUBID_COUNT} for ${NAME}" >&2
+}
+
+# Instances can start in parallel at boot and would pick the same gap. Braces
+# keep 2>/dev/null off the shell's own stderr — bare `exec ... 2>/dev/null`
+# redirects it permanently.
+if { exec 9>/run/lock/myosi-subid.lock; } 2>/dev/null; then
+    flock 9 2>/dev/null || true
+fi
+
+subid_ensure /etc/subuid
+subid_ensure /etc/subgid
+
+# Linger is the point of the classic mode: it starts user@<uid>.service at
+# boot, which is what runs the rootless quadlets in ~/.config/containers/
+# systemd. On a homed user this would start a manager with no accessible
+# $HOME, so it is deliberately not done there.
+if [ "$STORAGE" = classic ]; then
+    if loginctl show-user "$NAME" -p Linger --value 2>/dev/null | grep -qx yes; then
+        :
+    else
+        loginctl enable-linger "$NAME" && \
+            echo "user-provision: enabled linger for ${NAME} (rootless quadlets start at boot)" >&2
+    fi
+fi
