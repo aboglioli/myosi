@@ -185,14 +185,6 @@ create_classic() {
     # the tree can land user_home_t-less. Cheap to redo, fatal to skip.
     command -v restorecon >/dev/null 2>&1 && restorecon -R "$home" >/dev/null 2>&1 || true
 
-    # memberOf is applied by homed itself in the other mode; useradd never
-    # reads the identity file, so do it here for the same end state.
-    local g
-    while read -r g; do
-        [ -n "$g" ] || continue
-        getent group "$g" >/dev/null 2>&1 || continue
-        gpasswd -a "$NAME" "$g" >/dev/null
-    done < <(ident '.memberOf[]')
 }
 
 if [ -n "$IDENTITY" ] && ! exists "$NAME"; then
@@ -210,6 +202,24 @@ if ! exists "$NAME"; then
     fi
     exit 0
 fi
+
+# The identity's own memberOf. homed keeps it in the record and re-applies it,
+# so this is what gives the classic mode the same end state. It has to live
+# here rather than in create_classic: a group named in memberOf may not exist
+# yet at creation time — a sysext's sysusers.d may not have run — and binding
+# only at creation would skip it forever, while the sysext drop-ins below get
+# retried on every trigger.
+while read -r want; do
+    [ -n "${want:-}" ] || continue
+    getent group "$want" >/dev/null 2>&1 || continue
+    case " $(id -nG "$NAME" 2>/dev/null) " in
+        *" $want "*) ;;
+        *)
+            gpasswd -a "$NAME" "$want" >/dev/null
+            echo "user-provision: added ${NAME} to ${want} (identity memberOf)" >&2
+            ;;
+    esac
+done < <(ident '.memberOf[]')
 
 # Scoped `if`, not `|| exit 0`: subid allocation below must still run on a host
 # whose sysexts declare no groups.
