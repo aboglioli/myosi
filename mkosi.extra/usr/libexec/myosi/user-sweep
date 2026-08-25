@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Run user-provision for every declared identity.
+#
+# /etc first so an operator-written record shadows a baked one of the same
+# name; a name present in both is provisioned once, from /etc.
+#
+# Each user is independent: one failure is reported and the sweep continues,
+# because a single bad record must not stop every other account from having
+# its groups re-bound. The unit still fails if anything failed, so the
+# problem is visible in `systemctl --failed` rather than only in the journal.
+
+set -uo pipefail
+
+seen=" "
+rc=0
+
+for dir in /etc/myosi/users /usr/share/myosi/users; do
+    [ -d "$dir" ] || continue
+    for f in "$dir"/*.user; do
+        [ -e "$f" ] || continue
+        name=${f##*/}; name=${name%.user}
+        case "$seen" in *" $name "*) continue ;; esac
+        seen="$seen$name "
+        if ! /usr/libexec/myosi/user-provision "$name"; then
+            echo "user-sweep: provisioning '$name' failed" >&2
+            rc=1
+        fi
+    done
+done
+
+[ "$seen" = " " ] && echo "user-sweep: no identities declared, nothing to do" >&2
+exit $rc
