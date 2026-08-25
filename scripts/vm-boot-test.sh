@@ -2,11 +2,19 @@
 # Boot a myosi image on an empty disk and assert the result, headless and
 # unattended. Same script for CI and for a laptop.
 #
-# The control channel is SSH over AF_VSOCK, not the console. The image
-# already ships systemd-ssh-generator, and tmpfiles.d/myosi.conf consumes
-# the ssh.authorized_keys.root system credential, so QEMU can hand the VM
-# a throwaway public key at launch via SMBIOS type 11 and get a real shell
+# The control channel is SSH over TCP, forwarded out of QEMU's user-mode
+# network, not the console. tmpfiles.d/myosi.conf consumes the
+# ssh.authorized_keys.root system credential, so QEMU can hand the VM a
+# throwaway public key at launch via SMBIOS type 11 and get a real shell
 # with no changes to the image and no console scraping.
+#
+# This used to run over AF_VSOCK, which was neater — no port to allocate —
+# but it broke twice for reasons that had nothing to do with the image:
+# /dev/vhost-vsock is root-only on a stock runner, and selinux-policy 44.7
+# denies AF_VSOCK socket activation outright, so sshd accepted the
+# connection and then never wrote its banner. TCP reaches the same sshd
+# over the path a real host is reached by, and depends on nothing but the
+# NIC the VM already had.
 #
 # Every run starts from a fresh qcow2 built from the image, which is the
 # only way to test first-boot behaviour: repart builds the pool, tmpfiles
@@ -29,7 +37,20 @@ mkdir -p "$WORK"
 WORK=$(cd "$WORK" && pwd)
 PIDFILE="$WORK/qemu.pid"
 TPMDIR="$WORK/tpm"
-CID=$(( (RANDOM % 60000) + 3000 ))
+
+# A free loopback port for the SSH forward. Concurrent runs on one host must
+# not collide, and picking a fixed one silently hands the run to whatever
+# already answers there — which is exactly how a stray host sshd once passed
+# itself off as the guest.
+pick_port() {
+    local p
+    for _ in $(seq 50); do
+        p=$(( (RANDOM % 20000) + 20000 ))
+        (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null || { echo "$p"; return 0; }
+    done
+    echo "no free port in 20000-40000" >&2; return 1
+}
+PORT=$(pick_port)
 
 cleanup() {
     rc=$?
@@ -103,17 +124,9 @@ rm -f "$WORK/id" "$WORK/id.pub"
 ssh-keygen -q -t ed25519 -N '' -f "$WORK/id" -C myosi-vm-test
 # .binary + base64 sidesteps every quoting hazard in the SMBIOS string.
 CRED=$(base64 -w0 < "$WORK/id.pub")
-echo "  throwaway key generated, vsock CID $CID"
+echo "  throwaway key generated, ssh on 127.0.0.1:$PORT"
 
 say "boot"
-# Fail here with a sentence rather than inside qemu's device setup. A myosi
-# host ships /dev/vhost-vsock 0666; a stock runner leaves it root-only.
-if [ ! -w /dev/vhost-vsock ]; then
-    echo "  /dev/vhost-vsock is not writable by $(id -un) — the vsock control" >&2
-    echo "  channel cannot open. Load vhost_vsock and relax the node:" >&2
-    echo "      sudo modprobe vhost_vsock && sudo chmod 0666 /dev/vhost-vsock" >&2
-    exit 1
-fi
 ACCEL="-accel tcg -cpu max"; TMO=${BOOT_TIMEOUT:-900}
 if [ -r /dev/kvm ]; then ACCEL="-accel kvm -cpu host"; TMO=${BOOT_TIMEOUT:-300}; fi
 echo "  ${ACCEL#-accel }, timeout ${TMO}s"
@@ -127,30 +140,16 @@ qemu-system-x86_64 \
   -drive if=virtio,format=qcow2,file="$WORK/disk.qcow2" \
   -chardev socket,id=chrtpm,path="$WORK/swtpm.sock" \
   -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-crb,tpmdev=tpm0 \
-  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
-  -device vhost-vsock-pci,guest-cid=$CID \
+  -netdev user,id=n0,hostfwd=tcp:127.0.0.1:$PORT-:22 \
+  -device virtio-net-pci,netdev=n0 \
   -smbios type=11,value=io.systemd.credential.binary:ssh.authorized_keys.root=$CRED \
   -display none -serial file:"$WORK/console.log" \
   -pidfile "$PIDFILE" -daemonize
 
-# Two ways to reach AF_VSOCK from ssh. socat is the portable one and is
-# what CI installs; systemd-ssh-proxy ships with systemd >= 256 and is
-# what a myosi host already has, so a local run needs no extra package.
-PROXY_OPTS=()
-if command -v socat >/dev/null 2>&1; then
-    PROXY="socat - VSOCK-CONNECT:$CID:22"
-elif [ -x /usr/lib/systemd/systemd-ssh-proxy ]; then
-    PROXY="/usr/lib/systemd/systemd-ssh-proxy vsock/$CID 22"
-    # systemd-ssh-proxy hands ssh a file descriptor rather than a stream;
-    # without this it fails with "Failed to send socket via STDOUT".
-    PROXY_OPTS=(-o ProxyUseFdpass=yes)
-else
-    echo "need socat or systemd-ssh-proxy to reach the VM over vsock" >&2
-    exit 1
-fi
+# The port is reused across runs, so a remembered host key would be a
+# false mismatch every time; the VM is throwaway and so is its key.
 SSH=(ssh -q -i "$WORK/id" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-     -o ConnectTimeout=5 -o LogLevel=ERROR "${PROXY_OPTS[@]}"
-     -o ProxyCommand="$PROXY" root@vm)
+     -o ConnectTimeout=5 -o LogLevel=ERROR -p "$PORT" root@127.0.0.1)
 
 say "wait for ssh"
 deadline=$(( SECONDS + TMO ))

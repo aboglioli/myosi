@@ -28,8 +28,18 @@ printf '  kernel  %s\n' "$(uname -r)"
 
 echo "== SELinux =="
 check "enforcing"            "Enforcing" "$(getenforce 2>/dev/null)"
-AVC=$(journalctl -b --no-pager 2>/dev/null | grep -ci 'avc: *denied')
-check "zero AVC denials"     "0"         "$AVC"
+# myosi boots with audit=0, so the kernel drops every denial record before
+# it can reach the journal: grepping for "avc: denied" returns 0 whether the
+# policy is clean or in ruins, which is the most dangerous kind of green.
+# Assert the precondition instead, so this reads as "not checked" rather
+# than "checked and fine", and the day audit is turned on the count starts
+# meaning something.
+if grep -qw 'audit=0' /proc/cmdline; then
+    printf '  SKIP  AVC denials not auditable (audit=0 on the kernel cmdline)\n'
+else
+    AVC=$(journalctl -b --no-pager 2>/dev/null | grep -ci 'avc: *denied')
+    check "zero AVC denials"     "0"         "$AVC"
+fi
 
 echo "== subvolume roots and the paths whose tmpfiles t-lines were removed =="
 # /var /home /srv carry no myosi t-line: systemd's own var.conf (q /var)
@@ -50,8 +60,15 @@ echo "== tmpfiles outcomes =="
 check "/var/lib/containers/users is 1777" "1777" "$(stat -c %a /var/lib/containers/users 2>/dev/null)"
 [ -d /var/log/journal ] && ok "/var/log/journal exists (persistent journal)" \
     || bad "/var/log/journal exists (persistent journal)" "missing — journald is volatile, logs die on reboot"
-[ -d /run/log/journal ] && bad "journal is persistent, not volatile" "/run/log/journal present" \
-    || ok "journal is persistent, not volatile"
+# NOT "is the journal persistent right now": on the very first boot it
+# cannot be. journald flushes to /var/log/journal once, early, and on a
+# fresh install /var does not exist yet — repart is still building the pool,
+# so tmpfiles creates the directory well after the flush has run and this
+# boot lives out its life in /run. Persistence starts at the second boot,
+# verified by rebooting a fresh VM. What first boot can honestly assert is
+# that the directory was created such that the next boot picks it up.
+check "/var/log/journal mode"  "2755"                 "$(stat -c %a /var/log/journal 2>/dev/null)"
+check "/var/log/journal group" "systemd-journal"      "$(stat -c %G /var/log/journal 2>/dev/null)"
 # Removed entries must NOT reappear.
 for p in /var/games /srv/machines /etc/extensions /var/lib/flatpak; do
     [ -e "$p" ] && bad "$p absent (entry was removed)" "still present" || ok "$p absent (entry was removed)"
