@@ -87,7 +87,14 @@ jobs:
           df -h / | tail -1
 
       - name: Decode Secure Boot certificate
-        if: ${{ github.event_name == 'release' || inputs.secure_boot }}
+        # An automatic run must always enroll: it is the per-release test, and
+        # Secure Boot is the half of the boot chain most worth proving. The
+        # old condition named the `release` event, which no longer triggers
+        # this workflow -- and `inputs` does not exist outside a dispatch, so
+        # on the automatic path both sides were false, SB_CERT stayed unset,
+        # and the release quietly got the weaker non-Secure-Boot boot. Only a
+        # manual dispatch gets to opt out, via its checkbox.
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.secure_boot }}
         env:
           MYOSI_BOOT_CRT: ${{ secrets.MYOSI_BOOT_CRT }}
         run: |
