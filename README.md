@@ -393,16 +393,15 @@ decoupled — no base-image edits needed when adding a new sysext):
    does — so a host that created its own primary user still gets bound.
 
 4. The binder runs at two trigger points: at boot via
-   `myosi-homed-user@<you>.service` (templated unit, ordered
-   After=systemd-homed.service so the varlink interface is up) AND
+   `myosi-users.service` (ordered After=systemd-homed.service so the
+   varlink interface is up) AND
    from `refresh_sysext` in `lib.sh` (after every live
    `systemd-sysext refresh`, which starts every **enabled** instance —
    it must not hardcode one, or it would materialize a user on a host
    that deliberately never enabled the unit).
 
-   **The instance is not enabled by default.** Run `systemctl enable
-   --now myosi-homed-user@<you>.service` once, post-install — see
-   [Post-installation](#post-installation). Until then, sysext group
+   **The unit is enabled the first time you run `myosi user-create`** —
+   see [Post-installation](#post-installation). Until then, sysext group
    drop-ins are installed but never bound to anyone.
 
 Adding a new feature that needs the default user in a new group is
@@ -611,21 +610,19 @@ on this layout. Generic summary so you know what to look for:
   (ExecStartPost to re-run sysext-modules-refresh / sysusers / binfmt /
   sysctl / tmpfiles after a sysext merge so the sysext-shipped
   config drops are processed).
-- `myosi-homed-user@.service` and `myosi-user@.service` are templated
-  oneshots that both run `/usr/libexec/myosi/user-provision %i` — the first
-  with `--storage=homed`, the second `--storage=classic` — to create the
-  account from `/usr/share/myosi/users/<name>.user` and bind the user to
-  active sysext groups. See
+- `myosi-users.service` runs `/usr/libexec/myosi/user-sweep`, which calls
+  `/usr/libexec/myosi/user-provision` for every record under
+  `/etc/myosi/users/` and `/usr/share/myosi/users/`. It picks homed or
+  classic per user, creates the account if it is missing, and binds the user
+  to active sysext groups. See
   [Choosing a user storage mode](#choosing-a-user-storage-mode). Decoupled from `systemd-homed.service`
   ExecStartPost (Type=notify on homed used to mask provisioning
   failures because READY=1 fires before ExecStartPost runs). **No
   instance is enabled by default** — the image ships no interactive user
-  (see [Post-installation](#post-installation)). The operator enables
-  `myosi-homed-user@<you>.service` post-install for group binding, or a
-  rebuilt image pre-bakes one by shipping
-  `/usr/share/myosi/users/<name>.user` plus a
-  `multi-user.target.wants/myosi-homed-user@<name>.service` symlink via
-  `mkosi.local.conf` `ExtraTrees=`.
+  (see [Post-installation](#post-installation)). `myosi user-create` writes
+  the record and enables the unit, or a rebuilt image pre-bakes one by
+  shipping `/usr/share/myosi/users/<name>.user` via `mkosi.local.conf`
+  `ExtraTrees=` — the sweep picks it up with no symlink needed.
 - `nvidia-cdi-refresh.service` ships `10-myosi-no-rate-limit.conf`
   (`StartLimitIntervalSec=10s` + `StartLimitBurst=20`) — its path watcher
   fires twice per `sysext-modules-refresh` run, so the default 5-in-10s
@@ -716,9 +713,10 @@ Run these steps after the first successful boot. The base image is identical on 
 <a id="post-installation"></a>
 #### 3a. Post-installation — create your user, then lock root
 
-**The image ships no interactive user.** `myosi-homed-user@.service` is
-present but **disabled**, and `/usr/share/myosi/users/user.user` is only an
-example. The single credential in the image is the console bootstrap:
+**The image ships no interactive user**, and it cannot ship one: `/home`
+lives on the data-luks pool, which `systemd-repart` only creates on first
+boot. `/usr/share/myosi/users/user.user.example` is a record template, not an
+account. The single credential in the image is the console bootstrap:
 **`root` / `changeme`**.
 
 **Why no default user:** a public image would have to pick a generic name
@@ -737,39 +735,21 @@ attacker needs physical access. It is also meant to be destroyed in step 4.
 For fleets, bake your own hash over `etc/shadow` via `mkosi.local.conf`
 `ExtraTrees=`.
 
-**Write a user record, then enable its unit.** That is the whole flow — the
-record is a plain file on the writable `/etc` subvolume, so this needs no
-rebuild and no credentials:
+**One command.** The record is a plain file on the writable `/etc` subvolume,
+so this needs no rebuild and no credentials:
 
 ```bash
 # 1. Log in at the CONSOLE as root / changeme.
 
-# 2. Describe YOUR user. Pick the real name now — it cannot be changed
-#    later. uid 1000 makes it the primary user. Full field list and a
-#    commented example live in /etc/myosi/users/README.
-cat >/etc/myosi/users/<you>.user <<'EOF'
-{
-    "userName": "<you>",
-    "uid": 1000,
-    "gid": 1000,
-    "realName": "<Your Name>",
-    "homeDirectory": "/home/<you>",
-    "shell": "/usr/bin/fish",
-    "memberOf": ["wheel", "video", "render", "input", "kvm"],
-    "preferredLanguage": "en_US.UTF-8",
-    "service": "io.systemd.Home",
-    "enforcePasswordPolicy": false
-}
-EOF
+# 2. Create your user. Pick the real name now — a homed user cannot be
+#    renamed later.
+myosi user-create <you> homed 1000 wheel,video,render,input,kvm
 
-# 3. Enable the instance. This CREATES the user (LUKS home, correct storage
-#    flags, SELinux defcontext) and binds it to any sysext-declared groups.
-#    Idempotent — re-running it later only re-checks group membership.
-systemctl enable --now myosi-homed-user@<you>.service
-homectl passwd <you>                  # rotate off the `changeme` bootstrap
+# 3. Rotate off the bootstrap password.
+homectl passwd <you>          # classic users: passwd <you>
 
 # 4. Verify you can log in as <you> on another TTY (Ctrl-Alt-F2) BEFORE
-#    this next step — locking root with no working user leaves you with
+#    the next step — locking root with no working user leaves you with
 #    only the USB installer as a way back in.
 passwd -l root
 
@@ -777,18 +757,54 @@ passwd -l root
 hostnamectl hostname <hostname>
 ```
 
-Leaving the instance enabled is what keeps your groups in sync: every
-`myosi extension-enable` re-runs it, so a sysext that introduces a new group
-binds it on the spot.
+##### `myosi user-create` parameters
 
-Step 3 also allocates the `/etc/subuid` + `/etc/subgid` ranges rootless
-podman, distrobox and incus need. Nothing else maintains those files — a
-homed record has no field that feeds them, and `usermod --add-subuids`
-refuses homed users because they are not in `/etc/passwd`. The helper takes
-the first free `1000000`-wide gap at or above `100000`, so it is safe on a
-pre-existing file with custom entries; an existing entry for your name is
-left alone, and if nothing fits it says so rather than writing a bad range.
-Verify with:
+Positional, in this order. Only `name` is required; everything after it has a
+default. To set a later one and skip an earlier one, pass `""` for the gap —
+`myosi user-create bob classic "" wheel` gives bob the `wheel` group and lets
+the uid be chosen.
+
+| # | param | required | default | notes |
+|---|---|---|---|---|
+| 1 | `name` | **yes** | — | lowercase letters, digits, `_`, `-`. Cannot be renamed later for a homed user |
+| 2 | `storage` | no | `classic` | `classic` or `homed`. See the table above |
+| 3 | `uid` | no | next free | also used as the gid. Pick `1000` for the primary user |
+| 4 | `groups` | no | none | comma-separated, e.g. `wheel,video`. Becomes `memberOf` |
+| 5 | `shell` | no | `/usr/bin/fish` if present, else `/bin/bash` | must exist on the host |
+| 6 | `realname` | no | unset | the GECOS field |
+
+Two environment variables affect creation:
+
+| variable | default | effect |
+|---|---|---|
+| `MYOSI_BOOTSTRAP_PASSWORD` | `changeme` | initial password for the new account |
+| `MYOSI_HOME_DISK_SIZE` | a third of free `/home`, capped at 50 GiB | homed LUKS image size, in bytes |
+
+Sysext groups are **not** listed here — `libvirt`, `incus-admin` and friends
+come from the `user-groups.d` drop-ins and are bound automatically, including
+on a later `myosi extension-enable`.
+
+##### What creation also does
+
+`myosi-users.service` is enabled the first time you create a user, and from
+then on re-applies group membership, subuid ranges and linger on every boot.
+Creation itself is one-shot; that re-application is what makes a group
+introduced by a sysext land on your user later without you doing anything.
+
+It also allocates the `/etc/subuid` + `/etc/subgid` ranges rootless podman,
+distrobox and incus need. Nothing else maintains those files — a homed record
+has no field that feeds them, and `usermod --add-subuids` refuses homed users
+because they are not in `/etc/passwd`; for classic users `useradd` would
+allocate a narrower 65536-wide range from `login.defs`, which is suppressed so
+both kinds match. The helper takes the first free `1000000`-wide gap at or
+above `100000`, so it is safe on a pre-existing file with custom entries; an
+existing entry for your name is left alone, and if nothing fits it says so
+rather than writing a bad range.
+
+```bash
+myosi user-list      # who is declared, and what actually landed
+myosi user-forget X  # stop re-applying X; the account itself is untouched
+```
 
 ```bash
 grep "^<you>:" /etc/subuid /etc/subgid
@@ -833,18 +849,17 @@ places, in order:
    operators cannot add records here. Only `user.user` ships, as an example
 
 With a record for `<name>`, enabling the instance creates the user and binds
-groups. With no record it binds groups only — so `systemctl enable --now
-myosi-homed-user@<you>.service` on a name you never wrote a file for will
-not conjure a user. (`@user` is the one exception: `user.user` is baked, so
+groups. With no record it binds groups only — so sweeping a name you never
+wrote a file for will not conjure a user. (Historically `user` was the one
+exception: `user.user` used to be baked, so
 enabling that instance does create the generic user.)
 
 Editing the record later does **not** update an existing user — creation is
 one-shot, gated on `homectl inspect`. Use `homectl update` for that.
 
 To pre-bake a user on a rebuilt image instead, ship
-`usr/share/myosi/users/<you>.user` plus a
-`multi-user.target.wants/myosi-homed-user@<you>.service` symlink through a
-private `mkosi.local.conf` `ExtraTrees=` overlay. Do **not** additionally
+`usr/share/myosi/users/<you>.user` through a private `mkosi.local.conf`
+`ExtraTrees=` overlay — the boot sweep finds it. Do **not** additionally
 enable `@user`: both instances claim UID 1000 and start in parallel, so
 which one wins is a race. If UID 1000 is already taken by someone else the
 helper never creates — it retargets group binding to the actual owner.
@@ -854,7 +869,7 @@ and presets cover the rest:
 
 | Unit | State | Enable when |
 |---|---|---|
-| `myosi-homed-user@<you>.service` | disabled | You want sysext group bindings kept in sync (above) |
+| `myosi-users.service` | enabled by `myosi user-create` | You want sysext group bindings kept in sync (above) |
 | `systemd-homed-firstboot.service` | disabled | You'd rather be prompted for a user on first boot, or drive it with a `home.create.<name>` credential. Blocks unattended installs if it prompts |
 | `bootc-fetch-apply-updates.timer` | disabled **on purpose** | Never — it conflicts with sysupdate-driven UKI rollover |
 
@@ -869,7 +884,7 @@ Interactive users on myosi are owned by `systemd-homed`. The user
 record ships as a declarative JSON file at
 `/usr/share/myosi/users/<name>.user` (UID, shell, supplementary
 groups, hashed password — NO secret/storage/diskSize, those are CLI
-flags). `myosi-homed-user@<name>.service` runs
+flags). `myosi-users.service` runs
 `/usr/libexec/myosi/user-provision --storage=homed <name>` on first boot,
 which calls `homectl create --identity=<file> --storage=luks
 --disk-size=50G --luks-discard=yes --luks-offline-discard=no
@@ -888,8 +903,8 @@ F45 ships systemd 260+, `secret.password` in the identity file
 becomes viable and the env-var path can retire.
 
 **Adding a user:** drop `/usr/share/myosi/users/<name>.user` into
-`mkosi.extra/` and add `enable myosi-homed-user@<name>.service` to
-`50-myosi.preset`. No script edits.
+`mkosi.extra/` and add `enable myosi-users.service` to `50-myosi.preset`.
+No script edits, no per-user unit.
 
 **Storage backend:** `luks` (per-user LUKS2 image with btrfs inside,
 50 GiB default). Defence in depth on top of data-luks: data-luks
@@ -980,8 +995,8 @@ line at deactivation on a record that already reports
    parallel `sshd-keygen@*` race no longer applies, but the
    sequential generator costs nothing and keeps logs readable).
 2. `systemd-homed.service` starts. **No user is provisioned** —
-   `myosi-homed-user@.service` ships disabled, so nothing calls
-   `homectl create`. (On images that pre-bake an identity via a private
+   `myosi-users.service` ships disabled and no record is baked, so nothing
+   calls `homectl create`. (On images that pre-bake an identity via a private
    overlay, the enabled `@<name>` instance runs `user-provision
    <name>` here, seeding the LUKS keyslot from the `MYOSI_BOOTSTRAP_PASSWORD`
    env default via `PASSWORD`/`NEWPASSWORD`.)
@@ -2115,10 +2130,10 @@ Only `/var`, `/home`, and persistent `/etc` are unique host state. The signed ro
 
 ## Choosing a user storage mode
 
-Two provisioners, one implementation. `myosi-homed-user@<name>.service`
-creates a systemd-homed record with a per-user LUKS home;
-`myosi-user@<name>.service` creates an ordinary `/etc/passwd` account with a
-plain home on the `/home` subvolume and **enables linger**. Both read the same
+Two storage modes, one implementation. `myosi user-create <name> homed`
+creates a systemd-homed record with a per-user LUKS home; the default,
+`classic`, creates an ordinary `/etc/passwd` account with a plain home on the
+`/home` subvolume and **enables linger**. Both read the same
 `/usr/share/myosi/users/<name>.user` identity file, and everything after
 account creation — sysext group binding, subuid/subgid allocation — is the
 same code, so the two cannot drift.
@@ -2190,7 +2205,7 @@ overrides the calculation.
 | Account | Default password | Notes |
 |---------|------------------|-------|
 | `root` | `changeme` (sha-512 hash in `/etc/shadow`) | **Console only** — sshd has no password method. Destroy with `passwd -l root` after creating your user |
-| interactive user | **none shipped** | `myosi-homed-user@.service` is disabled; you create your own with `homectl create` on first boot |
+| interactive user | **none shipped** | create your own post-install with `myosi user-create <name>` |
 
 Hashes are baked into `mkosi.extra/etc/shadow` (sha-512 + fixed salt for reproducible builds). `systemd-sysusers` preserves shipped shadow entries on first boot, so the hash survives user creation.
 
@@ -2211,7 +2226,7 @@ The image ships exactly one known credential, it is unusable remotely, and step 
 
 **sudo:** `%wheel ALL=(ALL) ALL`. `user` is in `wheel`. Prompts for password each `timestamp_timeout=15` minutes.
 
-**Rootless podman:** `/etc/subuid` + `/etc/subgid` bake only the static image-owned identities — `root` at `1500000:200000`, `containers` at `2000000:1000000`. The interactive user is **not** baked (the image ships none, and the name is per-host); `myosi-homed-user@<name>` allocates it the first free `1000000`-wide gap at or above `100000` on provisioning.
+**Rootless podman:** `/etc/subuid` + `/etc/subgid` bake only the static image-owned identities — `root` at `1500000:200000`, `containers` at `2000000:1000000`. The interactive user is **not** baked (the image ships none, and the name is per-host); `user-provision` allocates it the first free `1000000`-wide gap at or above `100000`, for classic and homed alike.
 
 
 ### Automated first-boot test
@@ -2503,7 +2518,7 @@ sudo systemd-sysext list
 - Expected — the image ships none. Log in at the **console** as `root` / `changeme` and create yours with `homectl create`; see [Post-installation](#post-installation). SSH won't work for this: sshd is publickey-only, so the bootstrap password is console-only by design.
 
 ### `myosi extension-enable` doesn't add me to `libvirt` / `incus-admin`
-- Group binding runs from `myosi-homed-user@<you>.service`, which is not enabled by default. `systemctl enable --now myosi-homed-user@<you>.service`, then log out and back in (group changes apply at next login). Verify the drop-ins exist under `/usr/share/myosi/user-groups.d/` and check `journalctl -u myosi-homed-user@<you>.service`.
+- Group binding runs from `myosi-users.service`, enabled the first time you run `myosi user-create`. A live `myosi extension-enable` also re-binds via the sysext refresh chain, but group changes only apply at next login — so log out and back in. Verify the drop-ins exist under `/usr/share/myosi/user-groups.d/` and check `journalctl -u myosi-users.service`.
 
 ### `systemd-nspawn --image=` fails with "Failed to load Verity signature partition: No data available"
 - Host kernel `.platform` keyring doesn't trust our `image.crt`. Expected on test hosts. Use the loop-mount + `--directory` + `--volatile=overlay` path documented above.
