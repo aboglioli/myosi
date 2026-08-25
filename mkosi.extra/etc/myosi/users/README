@@ -8,7 +8,7 @@ That creates the user (LUKS home, SELinux defcontext, correct storage flags),
 binds it to groups declared by active sysexts, and allocates its
 /etc/subuid + /etc/subgid ranges.
 
-homed-user-provision searches this directory first, then the baked
+user-provision searches this directory first, then the baked
 /usr/share/myosi/users/. This one is writable and survives A/B image updates;
 /usr is read-only erofs, so records cannot be added there.
 
