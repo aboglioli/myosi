@@ -784,6 +784,37 @@ Sysext groups are **not** listed here — `libvirt`, `incus-admin` and friends
 come from the `user-groups.d` drop-ins and are bound automatically, including
 on a later `myosi extension-enable`.
 
+##### What `myosi-users.service` will and will not change
+
+It runs on every boot, so it is worth being precise about its reach. It only
+looks at declared records — `/etc/myosi/users/*.user` and
+`/usr/share/myosi/users/*.user`. A user you made by hand, with no record, is
+never touched; with no records at all the sweep logs *"no identities declared,
+nothing to do"* and exits.
+
+For a user it does manage:
+
+| | |
+|---|---|
+| password, shell, uid, gid, home | **never touched** |
+| group membership | **re-applied every boot** |
+| subuid/subgid range | added once; an existing entry is left alone whatever its size |
+| linger | set at creation only |
+| the account itself | created once; never removed or recreated |
+
+Group membership is re-applied deliberately: that is how a group introduced by
+a sysext reaches an existing user. The cost is that removing someone from a
+group named in their record, or in a `user-groups.d` drop-in, does not stick —
+edit the record instead. Linger is not re-applied for exactly the opposite
+reason: nothing external ever turns it on, so re-asserting it could only
+override a deliberate `loginctl disable-linger`.
+
+One edge worth knowing: if a record declares a uid that some *other* account
+already owns, the sweep binds groups to that other account rather than failing,
+and skips creation. That keeps a host whose primary user predates the record
+from being left without its sysext groups — but it does mean an undeclared user
+can be modified by owning a declared uid.
+
 ##### What creation also does
 
 `myosi-users.service` is enabled the first time you create a user, and from

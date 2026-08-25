@@ -206,6 +206,15 @@ create_classic() {
     echo "user-provision: creating classic user '$NAME' (home $home, shell $shell)" >&2
     useradd "${args[@]}" "$NAME"
     printf '%s:%s\n' "$NAME" "$BOOTSTRAP_PASSWORD" | chpasswd
+
+    # Linger is what starts user@<uid>.service at boot, which is what runs the
+    # rootless quadlets in ~/.config/containers/systemd. Set here, at creation,
+    # and never re-asserted: nothing external ever turns linger on, so a sweep
+    # that re-enabled it could only be overriding a deliberate
+    # `loginctl disable-linger`. Groups are different — a sysext can introduce
+    # one later — which is why those ARE re-applied every run.
+    loginctl enable-linger "$NAME" && \
+        echo "user-provision: enabled linger for ${NAME} (rootless quadlets start at boot)" >&2
     # useradd creates the home before the account is known to the policy, so
     # the tree can land user_home_t-less. Cheap to redo, fatal to skip.
     command -v restorecon >/dev/null 2>&1 && restorecon -R "$home" >/dev/null 2>&1 || true
@@ -343,15 +352,3 @@ fi
 subid_ensure /etc/subuid
 subid_ensure /etc/subgid
 
-# Linger is the point of the classic mode: it starts user@<uid>.service at
-# boot, which is what runs the rootless quadlets in ~/.config/containers/
-# systemd. On a homed user this would start a manager with no accessible
-# $HOME, so it is deliberately not done there.
-if [ "$STORAGE" = classic ]; then
-    if loginctl show-user "$NAME" -p Linger --value 2>/dev/null | grep -qx yes; then
-        :
-    else
-        loginctl enable-linger "$NAME" && \
-            echo "user-provision: enabled linger for ${NAME} (rootless quadlets start at boot)" >&2
-    fi
-fi
