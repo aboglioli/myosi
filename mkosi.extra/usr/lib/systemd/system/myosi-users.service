@@ -1,0 +1,31 @@
+[Unit]
+Description=Re-apply myosi user bindings (groups, subids, linger)
+Documentation=file:///usr/libexec/myosi/user-provision
+DefaultDependencies=yes
+# homed is Wants=, not Requires=: a host with only classic users must not
+# fail here, and a homed record simply cannot be touched before homed is up.
+After=local-fs.target systemd-homed.service systemd-logind.service
+Wants=systemd-homed.service
+RequiresMountsFor=/home
+# Before getty so a login prompt does not appear while an account is still
+# being materialized on the boot after `myosi user-create`.
+Before=getty.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+StandardOutput=journal+console
+StandardError=journal+console
+# Sweeps every declared identity. Creation is one-shot — the provisioner
+# exits early once the account exists — while the things that change
+# underneath a user are re-applied every boot: a group that only appears
+# when a sysext is merged, a subuid range, linger. That re-application is
+# the whole reason a unit exists at all; `myosi user-create` is the operator
+# action, this is the upkeep.
+ExecStart=/usr/libexec/myosi/user-sweep
+# A homed create formats a LUKS image; on emulated TPM or slow CPUs that is
+# minutes, and the sweep may have several to do.
+TimeoutStartSec=20min
+
+[Install]
+WantedBy=multi-user.target

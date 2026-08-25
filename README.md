@@ -2148,12 +2148,23 @@ a classic home is still encrypted at rest. What homed adds is separation from
 *other users and from root*, which is the point on a shared laptop and close to
 worthless on a single-admin server.
 
-Neither instance is enabled by default; the image ships no interactive user.
+The image ships no interactive user, and it cannot: `/home` lives on the
+data-luks pool, which `systemd-repart` only creates on first boot. So user
+creation is a post-install act, done with one command:
 
 ```bash
-sudo systemctl enable --now myosi-user@alice.service        # server
-sudo systemctl enable --now myosi-homed-user@alice.service  # workstation
+sudo myosi user-create bob                          # server, classic
+sudo myosi user-create alice homed 1200 wheel,video # workstation
+sudo myosi user-list
+sudo myosi user-forget bob                          # stop managing, keep the account
 ```
+
+`user-create` writes `/etc/myosi/users/<name>.user` and provisions immediately.
+`myosi-users.service` then sweeps those records on every boot: creation is
+one-shot, while group membership, subuid ranges and linger are re-applied — so
+a group that only exists once a sysext is merged still lands on the user
+later. That re-application is the only reason a unit exists; the recipe is the
+operator interface.
 
 Creating the same name in both modes is refused, in either order — a classic
 account over a homed one shadows a home the operator can no longer reach.

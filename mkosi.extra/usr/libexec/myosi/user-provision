@@ -30,7 +30,7 @@
 
 set -euo pipefail
 
-STORAGE=homed
+STORAGE=auto
 NAME=
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -40,10 +40,10 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-: "${NAME:?usage: user-provision [--storage=homed|classic] <username>}"
+: "${NAME:?usage: user-provision [--storage=auto|homed|classic] <username>}"
 case "$STORAGE" in
-    homed|classic) ;;
-    *) echo "user-provision: --storage must be homed or classic, got '$STORAGE'" >&2; exit 2 ;;
+    auto|homed|classic) ;;
+    *) echo "user-provision: --storage must be auto, homed or classic, got '$STORAGE'" >&2; exit 2 ;;
 esac
 
 DROP_DIR=/usr/share/myosi/user-groups.d
@@ -67,6 +67,7 @@ ident() { [ -n "$IDENTITY" ] && jq -r "$1 // empty" "$IDENTITY" 2>/dev/null || t
 is_homed() { homectl inspect "$1" >/dev/null 2>&1; }
 exists()   { getent passwd "$1" >/dev/null 2>&1; }
 
+
 RECORD_UID=$(ident '.uid')
 if [ -n "$RECORD_UID" ] && ! is_homed "$NAME"; then
     # No pipeline: getent exits 2 on an unused uid, and pipefail turned that
@@ -84,18 +85,42 @@ if [ -n "$RECORD_UID" ] && ! is_homed "$NAME"; then
     fi
 fi
 
-# Refuse to manage the same name in both modes. Creating a classic account
-# over a homed one shadows a home the operator cannot then reach, and the
-# reverse leaves two records disagreeing about the same uid.
-if [ "$STORAGE" = classic ] && is_homed "$NAME"; then
-    echo "user-provision: '$NAME' is a homed user — refusing to also create a classic account." >&2
-    echo "  Use myosi-homed-user@${NAME}.service, or remove the record with 'homectl remove ${NAME}'." >&2
-    exit 1
+# Resolve --storage=auto here, AFTER the retarget above may have pointed NAME
+# at a different account. Resolving earlier meant a sweep could carry the mode
+# from one identity onto another user's name and then refuse itself.
+if [ "$STORAGE" = auto ]; then
+    if is_homed "$NAME"; then
+        STORAGE=homed
+    elif exists "$NAME"; then
+        STORAGE=classic
+    elif [ "$(ident '.service')" = "io.systemd.Home" ]; then
+        # The record's own `service` field, a real user-record concept homed
+        # stamps on what it manages — so nothing myosi-specific is smuggled
+        # into a JSON that homectl also parses and rejects unknown keys from.
+        STORAGE=homed
+    else
+        # No record, no account, no marker: a plain account is the safe
+        # default. It needs no unlock and grants no encryption nobody asked
+        # for.
+        STORAGE=classic
+    fi
 fi
-if [ "$STORAGE" = homed ] && exists "$NAME" && ! is_homed "$NAME"; then
-    echo "user-provision: '$NAME' already exists as a classic user — refusing to create a homed record." >&2
-    echo "  Use myosi-user@${NAME}.service, or remove the account with 'userdel ${NAME}'." >&2
-    exit 1
+
+# Refuse to manage the same name in both modes — a classic account over a
+# homed one shadows a home the operator cannot then reach. Only meaningful
+# when creation is on the table: with no identity there is nothing to create
+# and the run is just re-binding groups, which is safe for either kind.
+if [ -n "$IDENTITY" ]; then
+    if [ "$STORAGE" = classic ] && is_homed "$NAME"; then
+        echo "user-provision: '$NAME' is a homed user — refusing to also create a classic account." >&2
+        echo "  Remove the record with 'homectl remove ${NAME}' if that is really what you want." >&2
+        exit 1
+    fi
+    if [ "$STORAGE" = homed ] && exists "$NAME" && ! is_homed "$NAME"; then
+        echo "user-provision: '$NAME' already exists as a classic user — refusing to create a homed record." >&2
+        echo "  Remove the account with 'userdel -r ${NAME}' if that is really what you want." >&2
+        exit 1
+    fi
 fi
 
 create_homed() {
