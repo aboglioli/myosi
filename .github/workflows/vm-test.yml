@@ -7,8 +7,13 @@
 name: vm-test
 
 on:
-  release:
-    types: [published]
+  # NOT release:published — that fires when the release object is created,
+  # which is before the build has uploaded any asset to it, so the download
+  # step raced and lost every time ("no assets to download"). Waiting for the
+  # build workflow to finish is the actual dependency.
+  workflow_run:
+    workflows: [myosi]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -29,6 +34,14 @@ jobs:
     name: First boot (fresh disk)
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    # A manual dispatch always runs. An automatic one only after a build that
+    # actually succeeded and was building a tag — a failed or branch build has
+    # no release to test.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       !contains(github.event.workflow_run.head_branch, '/'))
     steps:
       - uses: actions/checkout@v5
 
@@ -93,11 +106,18 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ inputs.tag }}"
-          [ -n "$TAG" ] || TAG="${{ github.event.release.tag_name }}"
+          # head_branch on a tag push is the tag itself.
+          [ -n "$TAG" ] || TAG="${{ github.event.workflow_run.head_branch }}"
           [ -n "$TAG" ] || TAG=$(gh release view --json tagName --jq .tagName)
           echo "testing $TAG"
           echo "TAG=$TAG" >> "$GITHUB_ENV"
-          gh release download "$TAG" --pattern 'myosi_*_x86-64.raw.zst' --clobber
+          # Say which of the two failure modes this is, rather than leaving
+          # "no assets to download" to be interpreted.
+          if ! gh release download "$TAG" --pattern 'myosi_*_x86-64.raw.zst' --clobber; then
+            echo "::error::no myosi_*_x86-64.raw.zst on release $TAG — the build may still be uploading, or it failed" >&2
+            gh release view "$TAG" --json assets --jq '.assets[].name' >&2 || true
+            exit 1
+          fi
           ls -l myosi_*_x86-64.raw.zst
 
       - name: Boot and assert
