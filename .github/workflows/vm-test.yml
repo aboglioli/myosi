@@ -35,12 +35,23 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     # A manual dispatch always runs. An automatic one only after a build that
-    # actually succeeded and was building a tag — a failed or branch build has
-    # no release to test.
+    # actually succeeded AND was building a release tag.
+    #
+    # The build workflow runs on pushes to main as well as on tags, but only
+    # its build+upload job is tag-gated, so a main push still finishes
+    # "successfully" and still fires workflow_run. head_branch is then the
+    # branch name, and the download step went looking for a release called
+    # "main" and failed the whole workflow on every merge.
+    #
+    # Excluding names with a "/" was meant to be the tag test; it is not, as
+    # "main" has no slash either. Release tags are calver -- 2026.08.25 or
+    # 2026.08.25.01 per build.yml's own tag filter -- so require the dots
+    # that every tag has and no branch here does.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
+       contains(github.event.workflow_run.head_branch, '.') &&
        !contains(github.event.workflow_run.head_branch, '/'))
     steps:
       - uses: actions/checkout@v5
