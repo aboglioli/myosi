@@ -2397,6 +2397,92 @@ max-zram-size = 16384     # capped at 16 GiB
 | virtio guest disks (`vd*`) | `mq-deadline` |
 | loop devices | `none` |
 
+### Laptop power policy (`/usr/libexec/myosi/power-tune`)
+
+Ships in the base image and costs nothing on hosts that are not laptops:
+`myosi-power-tune.service` carries
+`ConditionPathExistsGlob=/sys/class/power_supply/BAT*`, so the preset enables it
+everywhere and systemd skips it — as skipped, not failed — on every desktop,
+server and VM in the fleet. A laptop with no GUI is tuned exactly like one with
+a compositor; nothing here touches the display.
+
+It runs at boot and again on each AC transition, driven by
+`/usr/lib/udev/rules.d/60-myosi-power.rules` matching `change` events on the
+Mains supply only — the battery emits one per capacity tick and would otherwise
+restart the unit every few seconds.
+
+Every knob is a generic kernel ABI and every write is skipped when the file is
+absent, so the same script covers Intel and AMD, any cpufreq driver, and any
+vendor's charge-threshold implementation:
+
+| Knob | AC | Battery | Portability |
+|------|-----|---------|-------------|
+| `powerprofilesctl` profile | `balanced` | `power-saver` | optional; desktop profile only |
+| `cpufreq/scaling_max_freq` | 100% of `cpuinfo_max_freq` | 50% | every cpufreq driver |
+| `energy_performance_preference` | `balance_performance` | `power` | intel_pstate, amd_pstate |
+| `scaling_governor` (EPP fallback) | `schedutil`/`ondemand` | `powersave` | chosen from `scaling_available_governors` |
+| PCI `power/control` | `auto` | `auto` | every PCI device |
+| `charge_control_end_threshold` | 80 | 80 | ASUS, ThinkPad, Dell, ... |
+
+Two deliberate choices worth not undoing:
+
+- **`scaling_max_freq`, not `intel_pstate/max_perf_pct`.** The percentage knob is
+  Intel-only. The frequency ceiling exists on every cpufreq driver and is
+  honoured under intel_pstate+HWP, which is the case where a generic knob would
+  most plausibly have been ignored.
+- **PCI runtime PM is `auto` on AC too.** Pinning devices `on` while plugged in,
+  the way TLP does, is actively harmful on a hybrid-graphics laptop: `on`
+  forbids runtime suspend, so it resumes a discrete GPU the driver had correctly
+  put to sleep and holds it awake for as long as the machine is docked.
+
+Host overrides go in `/etc/myosi/power.conf` (sourced by the script, lands in
+the `/etc` overlay upper): `BATTERY_MAX_FREQ_PCT`, `BATTERY_EPP`, `AC_EPP`,
+`CHARGE_END_THRESHOLD`.
+
+#### Not shipped: PCIe ASPM
+
+`pcie_aspm.policy=powersave` is deliberately **not** on the base cmdline. It can
+only be set there — `lockdown=integrity` makes
+`/sys/module/pcie_aspm/parameters/policy` reject runtime writes ("Operation not
+permitted"), and the per-device `link/l1_aspm` knob is not exposed on the
+kernels this ships. The cmdline is baked into one signed UKI shared by the whole
+fleet, so there is no way to scope it to laptops: it would be a global,
+unmeasured change to satisfy one host class. Add it per build instead, in
+`mkosi.local.conf`:
+
+```
+[Content]
+KernelCommandLine=pcie_aspm.policy=powersave
+```
+
+`powersupersave` additionally enables the deep L1.1/L1.2 substates and saves
+more, at the risk of dropping marginal devices off the bus.
+
+#### Reference measurements (one host)
+
+Hardware-specific and recorded only to calibrate expectations — an ROG Strix
+Scar 18 (i9-14900HX, 2560x1600 240 Hz mini-LED, 64 GB, dual NVMe), paired A/B
+at fixed conditions:
+
+| Change | Effect |
+|--------|--------|
+| Backlight 100% -> 30% -> 1% | 40.7 W -> 28.5 W -> 23.8 W |
+| PCI `power/control=auto` | -1.8 W idle |
+| 240 Hz -> 60 Hz | -1.5 W idle |
+| CPU ceiling 100% -> 40% | package 29.1 W -> 24.3 W under all-core load |
+| CPU ceiling 30% + `EPP=power` | package 29.1 W -> 18.1 W under all-core load |
+
+The backlight dominates everything else combined, and the policy above moves
+idle draw by roughly nothing on that machine — its idle CPU is already ~4 W.
+What it buys is the ceiling under load, where the same host pulls 45-100 W, and
+the charge threshold. On a class of laptop with a less extreme panel the
+balance is different; measure before assuming.
+
+Two things that look like levers on that hardware and are not: RAPL package
+limits (`constraint_0_power_limit_uw` reads back as written and enforces
+nothing) and the `asus-armoury` PPT attributes. Both are vendor-firmware
+dependent, which is the reason neither appears in the script.
+
 ### Other base configs
 
 | File | Effect |

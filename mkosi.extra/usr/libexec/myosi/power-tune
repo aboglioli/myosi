@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Apply the AC/battery power policy. Driven by 60-myosi-power.rules on every
+# power-source transition and once at boot by myosi-power-tune.service.
+#
+# Hardware-agnostic by construction: every knob is a generic kernel ABI, and
+# each write is skipped when the file is absent. Nothing here is specific to a
+# vendor, a CPU driver, a GPU, or a desktop — the unit is gated on a battery
+# existing at all, so desktops and headless hosts never run it, and a laptop
+# without a compositor is tuned exactly like one with it.
+#
+# Division of labour with power-profiles-daemon: PPD owns EPP and
+# /sys/firmware/acpi/platform_profile, so when powerprofilesctl exists we drive
+# it rather than writing those files behind its back — PPD re-asserts its own
+# view on the next profile change and a direct write would silently lose. PPD
+# is desktop-profile-only, so the no-PPD path writes the same intent directly.
+# PPD never reacts to the AC line by itself: profile switching on unplug is a
+# GNOME/KDE behaviour, not a daemon one.
+
+set -euo pipefail
+
+# Host overrides land in the /etc overlay upper and survive image updates.
+BATTERY_MAX_FREQ_PCT=50
+BATTERY_EPP=power
+AC_EPP=balance_performance
+CHARGE_END_THRESHOLD=80
+
+CONF=/etc/myosi/power.conf
+# shellcheck source=/dev/null
+[ -r "$CONF" ] && . "$CONF"
+
+on_ac() {
+    local supply
+    for supply in /sys/class/power_supply/*; do
+        [ "$(cat "$supply/type" 2>/dev/null || true)" = Mains ] || continue
+        [ "$(cat "$supply/online" 2>/dev/null || true)" = 1 ] && return 0
+    done
+    return 1
+}
+
+write_if_present() {
+    local value=$1 path
+    shift
+    for path in "$@"; do
+        [ -w "$path" ] || continue
+        echo "$value" > "$path" 2>/dev/null || true
+    done
+}
+
+# scaling_max_freq and not intel_pstate/max_perf_pct: the percentage knob is
+# Intel-only, while every cpufreq driver (intel_pstate active or passive,
+# amd_pstate, acpi-cpufreq, the ARM ones) exposes a per-policy frequency
+# ceiling. Verified honoured under intel_pstate+HWP, which is the case where a
+# generic knob most plausibly would not be. Clamped to cpuinfo_min_freq so a
+# small percentage cannot write a value the policy rejects.
+apply_cpu_ceiling() {
+    local pct=$1 policy max min target
+    for policy in /sys/devices/system/cpu/cpu*/cpufreq; do
+        max=$(cat "$policy/cpuinfo_max_freq" 2>/dev/null || true)
+        min=$(cat "$policy/cpuinfo_min_freq" 2>/dev/null || true)
+        [ -n "$max" ] && [ -n "$min" ] || continue
+        target=$(( max * pct / 100 ))
+        [ "$target" -lt "$min" ] && target=$min
+        write_if_present "$target" "$policy/scaling_max_freq"
+    done
+}
+
+# EPP where the driver has it (intel_pstate, amd_pstate); the governor is the
+# fallback for drivers that do not, and is chosen from what the policy actually
+# advertises rather than assumed — acpi-cpufreq offers powersave, schedutil-
+# based policies do not.
+apply_cpu_bias() {
+    local epp=$1 want=$2 policy governor
+    if compgen -G "/sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference" >/dev/null; then
+        write_if_present "$epp" /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference
+        return
+    fi
+    for policy in /sys/devices/system/cpu/cpu*/cpufreq; do
+        for governor in $want; do
+            case " $(cat "$policy/scaling_available_governors" 2>/dev/null || true) " in
+                *" $governor "*) write_if_present "$governor" "$policy/scaling_governor"; break ;;
+            esac
+        done
+    done
+}
+
+if on_ac; then
+    powerprofilesctl set balanced 2>/dev/null || apply_cpu_bias "$AC_EPP" "schedutil ondemand"
+    apply_cpu_ceiling 100
+else
+    powerprofilesctl set power-saver 2>/dev/null || apply_cpu_bias "$BATTERY_EPP" "powersave schedutil"
+    # PPD's power-saver moves EPP and platform_profile but leaves the frequency
+    # ceiling alone, so this is ours to apply on both paths.
+    apply_cpu_ceiling "$BATTERY_MAX_FREQ_PCT"
+fi
+
+# Runtime PM is set to auto on AC as well as on battery. The obvious-looking
+# alternative — pinning devices `on` while plugged in, the way TLP does — is
+# actively harmful on a hybrid-graphics laptop: `on` forbids runtime suspend,
+# so it resumes a discrete GPU that the driver had correctly put to sleep and
+# holds it awake for the whole time the machine is docked. `auto` is the right
+# default everywhere; the kernel only suspends a device whose driver declares
+# it safe, so devices with no runtime PM support simply ignore it.
+write_if_present auto /sys/bus/pci/devices/*/power/control
+
+# Not a function of the current power source: the threshold has to stand while
+# plugged in, which is exactly when it does its work. Generic kernel ABI —
+# present on ASUS, ThinkPad, Dell and others, absent elsewhere and skipped.
+write_if_present "$CHARGE_END_THRESHOLD" \
+    /sys/class/power_supply/*/charge_control_end_threshold

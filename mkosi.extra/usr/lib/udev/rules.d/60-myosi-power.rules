@@ -1,0 +1,12 @@
+# Re-apply the power policy when the AC line changes.
+#
+# The kernel emits a power_supply "change" uevent on both the Mains supply and
+# the battery when the charger is plugged or pulled. Only the Mains one is
+# matched: the battery emits a change event on every capacity tick, which
+# would restart the unit every few seconds for no reason.
+#
+# `systemctl start --no-block` and not RUN+= with the script directly: udev
+# kills anything still running in a RUN+= after a short timeout, and the
+# script writes several hundred sysfs files across the PCI bus.
+SUBSYSTEM=="power_supply", ACTION=="change", ATTR{type}=="Mains", \
+    RUN+="/usr/bin/systemctl start --no-block myosi-power-tune.service"
