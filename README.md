@@ -79,7 +79,7 @@ Slot sizes are pinned (`SizeMinBytes=SizeMaxBytes`) so systemd-repart's build an
 | `myosi_VERSION_ARCH_<VERITY_UUID>.verity.raw.zst` | Verity hash partition for sysupdate. UUID is the LAST 16 bytes of the root hash. Same `@u` mechanism. |
 | `myosi_VERSION_ARCH.verity-sig.raw.zst` | Verity signature partition |
 | `containers_VERSION_ARCH.raw` | Sysext: Podman, Distrobox, Compose, Skopeo, Incus + container-selinux baked into base policy |
-| `desktop_VERSION_ARCH.raw` | Sysext: Niri, audio, apps. Lists no font packages — the user installs fonts into `~/.local/share/fonts` (`myenv install-fonts`); only GTK's dependency fonts come along as a fallback. |
+| `desktop_VERSION_ARCH.raw` | Sysext: Niri, audio, apps, and qutebrowser as the primary browser — its QtWebEngine links the system ffmpeg, so this sysext also carries RPM Fusion's full `ffmpeg` (see the codec stack section). Lists no font packages — the user installs fonts into `~/.local/share/fonts` (`myenv install-fonts`); only GTK's dependency fonts come along as a fallback. |
 | `virt_VERSION_ARCH.raw` | Sysext: libvirt, qemu, vfio, virt-manager |
 | `nvidia_VERSION_ARCH.raw` | Sysext: NVIDIA `current` (595.x open kernel modules, Turing+ — RTX 16xx/20xx/30xx/40xx/50xx). All `nvidia*.ko` signed with `boot.key`. |
 | `nvidia-580xx_VERSION_ARCH.raw` | Sysext: NVIDIA `580xx` legacy proprietary modules (Maxwell / Pascal / Volta — GTX 9xx/10xx, Titan V). All `nvidia*.ko` signed with `boot.key`. |
@@ -305,6 +305,17 @@ To check a running host:
 ffmpeg -hide_banner -h decoder=hevc   # must NOT say "no decoders ... available"
 ffmpeg -hide_banner -decoders | grep -w h264
 ```
+
+In qutebrowser, `qute://version` and `chrome://gpu` report the
+QtWebEngine/Chromium build and whether rasterisation, WebGL and video
+decode are hardware accelerated.
+
+qutebrowser costs the desktop sysext about **440 MB installed**, 291 MB
+of which is `qt6-qtwebengine` — the largest single entry in the desktop
+package set. Twitch may still serve an "unsupported browser" page after
+the codecs are fixed, because it allowlists user agents; that is a
+per-site `content.headers.user_agent` override in the user's own
+`~/.config/qutebrowser/config.py`, not an image concern.
 
 ### Kernel-module sysexts + the depmod overlay
 
