@@ -1,0 +1,6 @@
+#!/usr/bin/sh
+# Re-apply the power policy on resume. The ACPI AC driver only emits a
+# change uevent when the state actually differs, so unplugging while
+# suspended is not guaranteed to reach 60-myosi-power.rules.
+[ "$1" = post ] || exit 0
+exec /usr/bin/systemctl start --no-block myosi-power-tune.service

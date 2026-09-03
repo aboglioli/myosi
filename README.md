@@ -2406,10 +2406,13 @@ everywhere and systemd skips it — as skipped, not failed — on every desktop,
 server and VM in the fleet. A laptop with no GUI is tuned exactly like one with
 a compositor; nothing here touches the display.
 
-It runs at boot and again on each AC transition, driven by
-`/usr/lib/udev/rules.d/60-myosi-power.rules` matching `change` events on the
+It runs at boot, on each AC transition (via
+`/usr/lib/udev/rules.d/60-myosi-power.rules`, matching `change` events on the
 Mains supply only — the battery emits one per capacity tick and would otherwise
-restart the unit every few seconds.
+restart the unit every few seconds), and on resume
+(`/usr/lib/systemd/system-sleep/myosi-power-tune`, because the ACPI AC driver
+only emits a change uevent when the state actually differs, so unplugging while
+suspended is not guaranteed to reach the udev rule).
 
 Every knob is a generic kernel ABI and every write is skipped when the file is
 absent, so the same script covers Intel and AMD, any cpufreq driver, and any
