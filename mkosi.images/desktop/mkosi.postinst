@@ -12,6 +12,20 @@ set -euo pipefail
 stage_sandbox_repos
 dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y --allowerasing ffmpeg
 
+# ffmpeg-libs exists only in RPM Fusion — Fedora's split is ffmpeg-free
+# + libav*-free — so its presence is proof the swap resolved against
+# RPM Fusion and not against Fedora's codec-crippled build. Worth an
+# explicit gate because rpmfusion-*.repo carry skip_if_unavailable=True:
+# a mirror outage would leave `ffmpeg` resolving to Fedora's ffmpeg-free
+# (it Provides ffmpeg), the build would succeed, and the loss would only
+# surface later as video sites refusing to play. QtWebEngine links the
+# system libavcodec, so the desktop browser is the first casualty.
+if ! chroot "$BUILDROOT" rpm -q ffmpeg-libs >/dev/null 2>&1; then
+    echo "ERROR: ffmpeg-libs absent after the swap — the desktop sysext" >&2
+    echo "       would ship without H.264/HEVC. Check RPM Fusion mirrors." >&2
+    exit 1
+fi
+
 # Unit activation is declarative: static .wants/ symlinks in mkosi.extra
 # work both baked and sysext-merged. User-scope pipewire sockets need the
 # /usr .wants/ symlinks — nothing runs `systemctl --user preset-all`, so

@@ -222,6 +222,90 @@ root slot selects the new sysexts, and a rollback (sd-boot menu or
 boot-counting) into the old slot re-selects the old sysexts — kernel
 modules always match the booted kernel.
 
+### Sysext layer order shadows files, not just packages
+
+The merged `/usr` is one overlayfs whose lowerdirs are the enabled
+sysexts **sorted by name**, with the verity root last:
+
+```
+lowerdir=/run/systemd/sysext/meta/usr
+        :/run/systemd/sysext/extensions/nvidia_<VER>_<ARCH>/usr
+        :/run/systemd/sysext/extensions/desktop_<VER>_<ARCH>/usr
+        :/usr
+```
+
+Earlier entries win. Nothing about that order is semantic — `nvidia`
+sits above `desktop` because "n" sorts after "d". So whenever two
+sysexts carry the same path, the alphabetically later name silently
+decides which file the whole system sees, and `st_dev` is the only way
+to tell them apart at runtime:
+
+```bash
+stat -c '%D %n' /usr/lib64/libavcodec.so.62 /usr/bin/ffmpeg
+```
+
+This bit us with codecs. Every sysext is built over the same
+`base-tree`, so any build-time dependency chain that pulls a Fedora
+package into a *second* sysext creates a duplicate — usually harmless,
+because both resolve to the same Fedora build. It stops being harmless
+the moment one sysext deliberately replaces a Fedora package: see the
+next section.
+
+### The codec stack: full ffmpeg, and why it needs guarding
+
+Fedora's `ffmpeg-free` / `libav*-free` are built with an explicit
+`--enable-decoder=` allowlist that omits `h264` and `hevc`, and the
+base image's `noopenh264` is, by its own summary, a *"Fake
+implementation of the OpenH264 library"*. Two image-side decisions undo
+that:
+
+- **base** ships Cisco's real `openh264` (repo file in
+  `mkosi.sandbox/`), which `Obsoletes: noopenh264`. Narrow but real:
+  `libQt6WebEngineCore.so` imports `WelsCreateSVCEncoder` /
+  `WelsDestroySVCEncoder` and none of the decoder entry points, so
+  openh264 is the browser's **WebRTC H.264 encoder** and nothing else —
+  playback decoding is `libavcodec`'s native `h264` throughout.
+- **desktop** swaps `ffmpeg-free` for RPM Fusion's `ffmpeg` in its
+  `mkosi.postinst` — `--allowerasing`, because both Provide `ffmpeg`
+  and `Packages=` has no per-package erase.
+
+This matters far beyond the `ffmpeg` CLI: Fedora's `qt6-qtwebengine`
+links the **system** `libavcodec.so.62` / `libavformat.so.62` /
+`libavutil.so.60`, so a QtWebEngine browser's H.264 and AAC support is
+exactly whatever `libavcodec` the merged `/usr` resolves to. Chromium-based
+engines report the loss as "unsupported browser" on video sites, which
+reads like a user-agent problem and is not one.
+
+The trap: `nvidia-settings` pulls in GTK, and with it `libheif`,
+`libchromaprint` and localsearch's `libextract-libav.so` — all real
+`NEEDED` consumers of `libavcodec` / `libavformat` / `libavutil` /
+`libswresample`. The **nvidia** sysext therefore acquires its own
+`-free` copies, and by the layer rule above those shadowed the desktop
+sysext's RPM Fusion ones. The visible state was a mixed stack:
+`/usr/bin/ffmpeg`, `libavfilter`, `libswscale` from `desktop`;
+`libavcodec` from `nvidia`; no H.264 or HEVC decoder anywhere.
+
+Two guards now make that loud instead of silent:
+
+- `swap_buildroot_ffmpeg_free` (in `mkosi.shared/sysext-build.sh`, run
+  from `sysext_finalize`) replaces Fedora's `-free` ffmpeg with RPM
+  Fusion's `ffmpeg-libs` in **any** sysext that ends up with it, and
+  fails the build if one survives. It swaps rather than removes: a
+  sysext enabled without `desktop` still needs a working `libavcodec`
+  for whatever pulled it in.
+- The desktop `mkosi.postinst` asserts `ffmpeg-libs` is installed after
+  its swap. That package exists only in RPM Fusion, so its presence
+  proves the swap did not quietly resolve back to Fedora — which it
+  would, without noise, whenever a mirror hiccup trips
+  `skip_if_unavailable=True` in `mkosi.sandbox/etc/yum.repos.d/`.
+
+To check a running host:
+
+```bash
+ffmpeg -hide_banner -h decoder=hevc   # must NOT say "no decoders ... available"
+ffmpeg -hide_banner -decoders | grep -w h264
+```
+
 ### Kernel-module sysexts + the depmod overlay
 
 Kmod-shipping sysexts (`nvidia`, `nvidia-580xx`, `zfs`) deliver
