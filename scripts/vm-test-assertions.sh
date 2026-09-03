@@ -91,6 +91,13 @@ done
 check "/etc is an overlay" "overlay" "$(findmnt -no FSTYPE /etc 2>/dev/null)"
 check "/ is erofs (verity root)" "erofs" "$(findmnt -no FSTYPE / 2>/dev/null)"
 
+# The one data subvolume that must NOT mount at boot. A stray [Install] would
+# silently undo that, so assert loaded + inactive + static.
+check "var-mnt-backups.mount loaded"       "loaded"   "$(systemctl show -p LoadState --value var-mnt-backups.mount 2>/dev/null)"
+check "var-mnt-backups.mount NOT active"   "inactive" "$(systemctl is-active var-mnt-backups.mount 2>/dev/null)"
+check "var-mnt-backups.mount NOT enabled"  "static"   "$(systemctl is-enabled var-mnt-backups.mount 2>/dev/null)"
+check "/mnt/backups exists, unmounted"     ""         "$(findmnt -no TARGET /var/mnt/backups 2>/dev/null)"
+
 echo "== units =="
 # systemd-tpm2-setup fails on first boot (writes the anchor secret, then
 # exits 1 on "NvPCRs already initialized"). Tracked separately; allowlisted

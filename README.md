@@ -65,7 +65,7 @@ root-a               erofs  5G        signed read-only root (slot A; fixed size 
 root-a-verity        verity 64M       Merkle tree for root-a
 root-a-verity-sig    cms    16K       signature of root hash
 root-b / verity / sig             same triple (slot B; empty placeholder until first sysupdate, SplitName=- to skip in --split=yes)
-data                 luks2+btrfs      grows to fill disk; /var, /home, /srv subvolumes
+data                 luks2+btrfs      grows to fill disk; /var, /home, /srv, /backups subvolumes
 ```
 
 Slot sizes are pinned (`SizeMinBytes=SizeMaxBytes`) so systemd-repart's build and `--split=yes` passes agree on verity hash offsets — without that the verity-sig partition ends up empty and the build fails. 5G slots hold ~2.2 GiB of base root content today, leaving room to embed `containers` / `virt` / `firmware` sysexts directly into the verity-baked root in future without changing the partition layout.
@@ -153,8 +153,35 @@ files referenced; this is the operator/contributor map.
 | `/var/lib/extensions/` | The discovery path systemd-sysext actually scans. `sysext-select` links exactly ONE version per sysext here (from the store or the baked baselines) — the one matching the booted `IMAGE_VERSION`. Operator-dropped regular files override selection for their sysext name. | Selector-managed + operator-mutable. |
 | `/etc/extensions/`, `/run/extensions/` | Additional sysext discovery paths (rare). | Operator-mutable. |
 | `/srv`, `/mnt` → `var/mnt` | `/srv` is a dedicated btrfs subvolume from `data-luks`; `/mnt` is symlinked into writable `/var`. | `/srv` and `/mnt` targets are operator-mutable. |
+| `/mnt/backups` → `/var/mnt/backups` | Dedicated btrfs subvolume from `data-luks`, mounted **only on demand** by `var-mnt-backups.mount`. Absent from the mount table until an operator starts it. | Operator-mutable, unmounted by default. |
 | `/var/lib/machines/` | Per-machine btrfs subvolumes for `systemd-nspawn` containers managed by `machinectl`. | Operator-mutable. |
 | `/usr/libexec/myosi/` | Shipped helper scripts (`sysext-modules-refresh`, `user-provision`, `sysext-select`, `install`, `lib.sh`). | Image-coupled. |
+
+### On-demand mounts: the `backups` subvolume
+
+`/var`, `/etc`, `/home` and `/srv` mount at boot from `50-myosi.preset`.
+`backups` is the exception: `var-mnt-backups.mount` ships **without an
+`[Install]` section** and is not in the preset, so nothing links it and
+nothing pulls it in. `systemctl enable` on it fails — *"no installation
+config"* — so the absence is enforced by unit shape, not convention.
+
+```bash
+sudo systemctl start var-mnt-backups.mount    # mount   (/mnt/backups)
+sudo systemctl stop  var-mnt-backups.mount    # unmount
+```
+
+Why a unit rather than an `fstab` line or a remembered `mount -o ...`: the
+options live in one reviewed place (`noatime`, `compress=zstd:3` matching the
+siblings, and `nodev,nosuid,noexec` because an archive volume is data), and a
+filesystem that is not mounted cannot be encrypted by ransomware running as
+the user or emptied by a mistyped `rm -rf`.
+
+The unit is named for the **canonical** path: `/mnt` is a symlink to
+`var/mnt`, and systemd refuses a `Where=` reached through a symlink, so
+`mnt-backups.mount` would never load. `systemd-repart` creates the subvolume
+at install time (`90-data.conf`) because it only does so under
+`FactoryReset=yes`. No `.automount` companion — a stray `ls /mnt/backups`
+would mount it and defeat the point.
 
 ### systemd-sysext discovery, multi-version merge, and baselines
 
@@ -698,7 +725,7 @@ sudo just install /dev/nvme0n1   # writes the same image to the internal disk
 
 First boot of the installed system runs:
 
-- `systemd-repart` in the initrd creates and grows `data-luks` to fill the disk, formats it as LUKS2 + btrfs, creates `/var`, `/etc`, `/home`, and `/srv` subvolumes (`FactoryReset=yes` + `Encrypt=key-file`)
+- `systemd-repart` in the initrd creates and grows `data-luks` to fill the disk, formats it as LUKS2 + btrfs, creates `/var`, `/etc`, `/home`, `/srv` and `/backups` subvolumes (`FactoryReset=yes` + `Encrypt=key-file`)
 - `myosi-data-attach.service` unlocks `/dev/mapper/data` (key-file first, then TPM2/passphrase fallback) + unlocks present `data-N` pool members + runs `btrfs device scan`. It does **not** mount anything
 - `sysroot-.etc.mount`, `myosi-etc-prepare.service` and `sysroot-etc.mount` mount the `/etc` subvolume at `/sysroot/.etc`, create and label the overlay layers inside it, and mount the overlay onto `/sysroot/etc`, all before pivot (`/var`, `/home`, `/srv` mount post-pivot via the explicit `var.mount`, `home.mount`, `srv.mount` units — not gpt-auto). On a fresh host the upper is empty, so `/etc` **is** the factory tree — there is no first-boot seeding step
 - `systemd-firstboot` (locale/timezone/etc pre-baked, no-op)

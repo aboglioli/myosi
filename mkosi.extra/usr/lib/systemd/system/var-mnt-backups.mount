@@ -1,0 +1,20 @@
+[Unit]
+Description=/var/mnt/backups (btrfs subvolume on data-luks, on-demand)
+Documentation=https://github.com/aboglioli/myosi/blob/main/README.md
+# Same pattern as srv.mount: bind to the dm device, not var.mount.
+After=dev-mapper-data.device
+BindsTo=dev-mapper-data.device
+
+[Mount]
+What=/dev/mapper/data
+Where=/var/mnt/backups
+Type=btrfs
+# nodev,nosuid,noexec: an archive volume is data, never executed.
+Options=defaults,noatime,compress=zstd:3,subvol=/backups,nodev,nosuid,noexec
+
+# No [Install], and absent from 50-myosi.preset: never mounted at boot, the
+# operator starts it for the duration of a backup. A volume that is not
+# mounted cannot be encrypted by ransomware or emptied by a mistyped rm -rf.
+#
+# Named for the canonical path — /mnt is a symlink to var/mnt, and systemd
+# rejects a Where= reached through a symlink.
