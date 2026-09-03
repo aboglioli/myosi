@@ -1,20 +1,15 @@
 [Unit]
 Description=Apply myosi AC/battery power policy
 Documentation=file:///usr/libexec/myosi/power-tune
-# The whole feature is laptop-only. A desktop or server has no BAT* supply,
-# the condition fails, and the unit is skipped rather than failed — so this
-# ships in the base image and stays inert on every host that is not a laptop.
+# Laptop-only: with no BAT* the unit is skipped, not failed.
 ConditionPathExistsGlob=/sys/class/power_supply/BAT*
-# intel_pstate and the PCI bus are up by then; power-profiles-daemon is
-# Wants= because it only exists in the desktop profile and the script falls
-# back to writing EPP directly when powerprofilesctl is absent.
 After=sysinit.target power-profiles-daemon.service
+# Wants=, not Requires=: PPD ships only in the desktop profile.
 Wants=power-profiles-daemon.service
 
 [Service]
 Type=oneshot
-# Re-run on every AC transition (60-myosi-power.rules restarts the unit), so
-# it must not latch. RemainAfterExit=yes would make the second start a no-op.
+# Re-runs on every AC transition, so it must not latch.
 RemainAfterExit=no
 ExecStart=/usr/libexec/myosi/power-tune
 

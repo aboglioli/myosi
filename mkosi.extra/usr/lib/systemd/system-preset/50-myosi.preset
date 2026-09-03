@@ -11,8 +11,7 @@
 
 enable myosi-sysext-relabel.service
 enable myosi-glib-schemas-compile.service
-# Self-gates on ConditionPathExistsGlob=/sys/class/power_supply/BAT*,
-# so enabling it unconditionally is inert on non-laptops.
+# Self-gating on a battery; inert on non-laptops.
 enable myosi-power-tune.service
 
 # No myosi-homed-user@ instance is enabled: homed cannot rename a user later
