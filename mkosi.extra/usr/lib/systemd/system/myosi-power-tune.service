@@ -1,0 +1,17 @@
+[Unit]
+Description=Apply myosi AC/battery power policy
+Documentation=file:///usr/libexec/myosi/power-tune
+# Laptop-only: with no BAT* the unit is skipped, not failed.
+ConditionPathExistsGlob=/sys/class/power_supply/BAT*
+After=sysinit.target power-profiles-daemon.service
+# Wants=, not Requires=: PPD ships only in the desktop profile.
+Wants=power-profiles-daemon.service
+
+[Service]
+Type=oneshot
+# Re-runs on every AC transition, so it must not latch.
+RemainAfterExit=no
+ExecStart=/usr/libexec/myosi/power-tune
+
+[Install]
+WantedBy=multi-user.target

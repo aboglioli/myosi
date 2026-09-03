@@ -1,0 +1,5 @@
+# Re-apply the power policy on AC transitions. Mains only — the battery emits
+# a change event per capacity tick and would restart the unit constantly.
+# systemctl start, not RUN+= on the script: udev kills slow RUN+= children.
+SUBSYSTEM=="power_supply", ACTION=="change", ATTR{type}=="Mains", \
+    RUN+="/usr/bin/systemctl start --no-block myosi-power-tune.service"

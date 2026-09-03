@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# AC/battery power policy, run at boot and on every power-source change.
+# Every knob is a generic kernel ABI and missing paths are skipped, so this
+# covers Intel/AMD/ARM and any vendor. Where power-profiles-daemon exists it
+# owns EPP and platform_profile, so we drive it instead of writing those
+# behind its back; PPD itself never reacts to the AC line.
+
+set -euo pipefail
+
+BATTERY_MAX_FREQ_PCT=50
+BATTERY_EPP=power
+AC_EPP=balance_performance
+CHARGE_END_THRESHOLD=80
+
+CONF=/etc/myosi/power.conf
+# shellcheck source=/dev/null
+[ -r "$CONF" ] && . "$CONF"
+
+on_ac() {
+    local supply
+    for supply in /sys/class/power_supply/*; do
+        [ "$(cat "$supply/type" 2>/dev/null || true)" = Mains ] || continue
+        [ "$(cat "$supply/online" 2>/dev/null || true)" = 1 ] && return 0
+    done
+    return 1
+}
+
+# Skips writes that would not change anything: a charge-threshold write emits
+# a power_supply change uevent, and on a vendor whose driver notifies the Mains
+# device that would re-trigger 60-myosi-power.rules and loop.
+write_if_present() {
+    local value=$1 path
+    shift
+    for path in "$@"; do
+        [ -w "$path" ] || continue
+        [ "$(cat "$path" 2>/dev/null || true)" = "$value" ] && continue
+        echo "$value" > "$path" 2>/dev/null || true
+    done
+}
+
+# scaling_max_freq, not intel_pstate/max_perf_pct: the percentage knob is
+# Intel-only. Clamped to cpuinfo_min_freq so a low percentage stays valid.
+apply_cpu_ceiling() {
+    local pct=$1 policy max min target
+    for policy in /sys/devices/system/cpu/cpu*/cpufreq; do
+        max=$(cat "$policy/cpuinfo_max_freq" 2>/dev/null || true)
+        min=$(cat "$policy/cpuinfo_min_freq" 2>/dev/null || true)
+        [ -n "$max" ] && [ -n "$min" ] || continue
+        target=$(( max * pct / 100 ))
+        [ "$target" -lt "$min" ] && target=$min
+        write_if_present "$target" "$policy/scaling_max_freq"
+    done
+}
+
+# EPP where the driver has it, else a governor the policy actually advertises.
+apply_cpu_bias() {
+    local epp=$1 want=$2 policy governor
+    if compgen -G "/sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference" >/dev/null; then
+        write_if_present "$epp" /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference
+        return
+    fi
+    for policy in /sys/devices/system/cpu/cpu*/cpufreq; do
+        for governor in $want; do
+            case " $(cat "$policy/scaling_available_governors" 2>/dev/null || true) " in
+                *" $governor "*) write_if_present "$governor" "$policy/scaling_governor"; break ;;
+            esac
+        done
+    done
+}
+
+if on_ac; then
+    powerprofilesctl set balanced 2>/dev/null || apply_cpu_bias "$AC_EPP" "schedutil ondemand"
+    apply_cpu_ceiling 100
+else
+    powerprofilesctl set power-saver 2>/dev/null || apply_cpu_bias "$BATTERY_EPP" "powersave schedutil"
+    # PPD's power-saver leaves the frequency ceiling alone.
+    apply_cpu_ceiling "$BATTERY_MAX_FREQ_PCT"
+fi
+
+# auto on AC too: pinning `on` forbids runtime suspend, which would resume a
+# hybrid-graphics dGPU and hold it awake for as long as the machine is docked.
+write_if_present auto /sys/bus/pci/devices/*/power/control
+
+# Not conditional on power source — the threshold has to hold while charging.
+write_if_present "$CHARGE_END_THRESHOLD" \
+    /sys/class/power_supply/*/charge_control_end_threshold
