@@ -25,11 +25,15 @@ on_ac() {
     return 1
 }
 
+# Skips writes that would not change anything: a charge-threshold write emits
+# a power_supply change uevent, and on a vendor whose driver notifies the Mains
+# device that would re-trigger 60-myosi-power.rules and loop.
 write_if_present() {
     local value=$1 path
     shift
     for path in "$@"; do
         [ -w "$path" ] || continue
+        [ "$(cat "$path" 2>/dev/null || true)" = "$value" ] && continue
         echo "$value" > "$path" 2>/dev/null || true
     done
 }
