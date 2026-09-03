@@ -1,0 +1,23 @@
+# Cisco's openh264 build, distributed by Fedora at codecs.fedoraproject.org.
+# The base image ships `openh264` from here; it Obsoletes Fedora's
+# `noopenh264` ("Fake implementation of the OpenH264 library"), which
+# otherwise satisfies qt6-qtwebengine's libopenh264.so.8 requirement with
+# a decoder that cannot decode.
+#
+# Pre-edited from the fedora-repos copy at /etc/yum.repos.d/:
+# - debuginfo/source sub-repos dropped, we never resolve against them.
+# - gpgkey moved from file:///etc/pki/rpm-gpg/ to an https URL. That
+#   path is the TARGET image's, not mkosi's sandbox, so the file form
+#   resolves to nothing at build time. $releasever keeps this file free
+#   of a hardcoded release, same as the RPM Fusion repo files.
+
+[fedora-cisco-openh264]
+name=Fedora $releasever openh264 (From Cisco) - $basearch
+metalink=https://mirrors.fedoraproject.org/metalink?repo=fedora-cisco-openh264-$releasever&arch=$basearch
+type=rpm
+enabled=1
+metadata_expire=14d
+repo_gpgcheck=0
+gpgcheck=1
+gpgkey=https://src.fedoraproject.org/rpms/fedora-repos/raw/rawhide/f/RPM-GPG-KEY-fedora-$releasever-primary
+skip_if_unavailable=True
