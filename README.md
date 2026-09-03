@@ -1671,45 +1671,68 @@ sudo btrfs scrub status /var
 
 Skip if you did not enable `virt`. The base image ships no libvirt
 configs — they live in a single setup script under the virt sysext
-itself. Running it once provisions:
+itself. Running it once provisions exactly two things:
 
 - A host NetworkManager bridge `br0`, enslaving your default-route
-  physical iface so VMs attached to it get LAN IPs from your router.
-- libvirt networks `default` (NAT virbr0 — uses the upstream
-  `/usr/share/libvirt/networks/default.xml` template) and `br0`
-  (`<forward mode='bridge'/>` pointing at the host bridge).
-- libvirt storage pools `default` (`/var/lib/libvirt/images`, qemu:qemu,
-  NoCOW btrfs subvol, `virt_image_t`) and `isos`
-  (`/var/lib/libvirt/isos`, `virt_content_t`).
+  physical iface, so guests attached to it are LAN peers with their own
+  MAC and a router-assigned IP. `br0` takes the slave's MAC, so the host
+  keeps its own DHCP reservation.
+- The matching libvirt network `br0` (`<forward mode='bridge'/>`).
 
 ```bash
-# From the local console (recommended — the bridge step briefly takes
-# the physical iface offline; SSH will see a 5-30 s gap):
 sudo /usr/libexec/myosi/virt-setup
 
 # If the auto-detected iface is wrong:
 sudo /usr/libexec/myosi/virt-setup --bridge-iface=enp3s0
-
-# Skip the bridge (only configure libvirt networks + pools):
-sudo /usr/libexec/myosi/virt-setup --skip-bridge
-
-# Bridge only, no libvirt yet:
-sudo /usr/libexec/myosi/virt-setup --bridge-only
 ```
 
-Idempotent — re-runs check every step and skip what's already in
-place, so it is safe to run after partial failures.
+Idempotent — every step checks first, so it is safe to re-run after a
+partial failure.
 
-Two libvirt networks ship from the script:
+**Over SSH.** The bridge step takes the physical iface down for 5-30 s
+while `br0` inherits its address. If anything fails between those two
+points the script restores the previous connection on the way out, but
+on a headless host a dead-man's switch is still the cheap insurance:
 
-| Network | Bridge | Mode | Use |
-|---------|--------|------|-----|
-| `br0` | `br0` | LAN bridge | guests get LAN addresses from the router |
-| `default` | `virbr0` | NAT | isolated guests with outbound internet |
+```bash
+sudo systemd-run --on-active=180 nmcli con up "$OLD_CONNECTION"
+```
 
-VM disks live under `/var/lib/libvirt/images`; ISOs under `/var/lib/libvirt/isos`. The upstream-canonical libvirt paths line up with stock SELinux policy — no aliases or local rules needed.
+**What it deliberately does NOT do:**
 
-Remote virt-manager:
+- *No NAT network.* `default`/`virbr0` exists for guests that must not
+  be on the LAN, which is the opposite of the point here. Define it from
+  `/usr/share/libvirt/networks/default.xml` if you ever want it.
+- *No storage pools.* Domains reference disks by absolute path, and
+  libvirt needs no pool for `<disk type='file'>`. Pools are a
+  virt-manager convenience, not a requirement.
+- *No directory creation.* `/var/lib/libvirt/images` (2775 qemu:qemu)
+  and `/var/lib/libvirt/isos` come from the sysext's `tmpfiles.d`
+  drop-in, which is the single source of truth for their modes. Having
+  the script `mkdir` them too would silently produce different modes
+  whenever tmpfiles had not run.
+
+VM disks live under `/var/lib/libvirt/images`; ISOs under
+`/var/lib/libvirt/isos`. These upstream-canonical paths line up with
+stock SELinux policy (`virt_image_t` / `virt_content_t`) — no aliases or
+local rules needed. `/var/lib/libvirt` is NoCOW via the base
+`tmpfiles.d`, so new qcow2 files inherit `+C`.
+
+**Wireless hosts cannot do this.** A station-mode 802.11 link drops
+frames whose source MAC is not the associated station's, so a bridged
+guest's traffic disappears. The script refuses to enslave a wireless
+iface rather than build a bridge that silently fails. On a laptop, pass
+`--bridge-iface=<ethernet>` with a cable in.
+
+Attach a guest:
+
+```xml
+<interface type='network'>
+  <source network='br0'/>
+</interface>
+```
+
+Remote virt-manager (it is not in the sysext — Flathub, or another host):
 
 ```bash
 virt-manager -c qemu+ssh://user@<host>/system
