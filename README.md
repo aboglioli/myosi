@@ -2001,16 +2001,96 @@ target appended for per-user settings — `ssh.authorized_keys.<username>`,
 Multiple SSH keys go in one file, one per line — it is `authorized_keys`
 format, not one file per key.
 
-**Hostname does not work here yet.** `mkosi.conf` sets `Hostname=myosi`,
-so `/etc/hostname` is baked into the factory tree and shows through the
-`/etc` overlay from the very first boot. `systemd-firstboot` only fills in
-values that are *unset*, so `firstboot.hostname` is a no-op on this image
-— the drop-in comment in
-`systemd-firstboot.service.d/` overstates what still applies. Naming a
-headless host is a `hostnamectl` call over SSH for now. Making the
-credential work would mean dropping `Hostname=` and setting
-`DEFAULT_HOSTNAME=myosi` in `os-release` instead, which is a change to the
-image, not to this procedure.
+### Image defaults live in `/usr/lib/credstore/`
+
+A default shipped as a file in `/etc` is not merely a default — it makes the
+matching credential **unreachable**, because every consumer that reads one
+(`systemd-firstboot`, `systemd-vconsole-setup`) skips when the value is
+already set. So the defaults that ought to be per-host live in
+`mkosi.extra/usr/lib/credstore/` instead, which is the lowest-priority entry
+in systemd's credential search path:
+
+| | |
+|---|---|
+| `/run/credentials/@system/` | the ESP, SMBIOS, qemu |
+| `/etc/credstore/` | operator, on the `/etc` overlay upper |
+| `/run/credstore/` | |
+| `/usr/lib/credstore/` | **the image default** |
+
+First match wins, so an ESP credential always beats the image default and an
+operator can override either at runtime. What the image ships:
+
+| credential | default | replaces |
+|---|---|---|
+| `firstboot.hostname` | `myosi` | `Hostname=` + `/etc/hostname` |
+| `firstboot.locale` | `en_US.UTF-8` | `Locale=` + `/etc/locale.conf` |
+| `firstboot.timezone` | `UTC` | `Timezone=` |
+| `vconsole.keymap` | `us` | `/etc/vconsole.conf` |
+| `vconsole.font` | `eurlatgr` | `/etc/vconsole.conf` |
+| `passwd.hashed-password.root` | the `changeme` hash | the root line in `/etc/shadow` |
+
+`/etc/shadow` still ships, with root **locked** (`root:!*::0:99999:7:::`).
+`systemd-firstboot` reads a locked account as "password not set" and applies
+the credential on first boot; shipping a real hash there would have made the
+credential unreachable forever. `DEFAULT_HOSTNAME=myosi` in `os-release` is
+the fallback if no hostname credential resolves at all.
+
+Because every one of these is gated on `ConditionFirstBoot=yes`, a credential
+can never clobber a later `passwd root`, `hostnamectl` or `localectl` — those
+edits land on the `/etc` overlay upper and survive image upgrades. `vconsole.*`
+is read every boot, but `/etc/vconsole.conf` overrides it, so `localectl
+set-keymap` still wins.
+
+Configuration that is *not* subject to a skip-if-set consumer stays in `/etc`
+exactly as before — `sshd_config.d/`, `sudoers.d/`, `subuid`, `subgid`,
+`issue`, `limits.d/`, `zram-generator.conf` and the rest are all overridable
+already, because the overlay upper wins over them.
+
+### Declaring users before the first boot
+
+Two credentials, one per storage model. Full examples in `credentials/`.
+
+**Classic users** — `sysusers.extra`, `sysusers.d(5)` lines applied by
+`systemd-sysusers.service`. This is what headless hosts want: a plain home on
+the pool, so `loginctl enable-linger` works and rootless podman quadlets start
+at boot and survive logout. An encrypted homed home cannot do that, because it
+is only unlocked while the user is logged in. Pair it with a `tmpfiles.extra`
+line creating `/var/lib/systemd/linger/<name>` and linger is declarative too.
+
+**homed users** — `home.create.<name>`, a full JSON user record consumed by
+`systemd-homed-firstboot.service`, which this image now enables. The record
+carries the storage flags inline (`storage`, `fileSystemType`, `diskSize`,
+`luksDiscard`, `luksOfflineDiscard`, `autoResizeMode`,
+`luksExtraMountOptions`), which is how it reproduces what `myosi user-create`
+applies by hand — including `autoResizeMode: grow` and
+`luksOfflineDiscard: false`, without which a home shrinks on every logout.
+
+Upstream's unit runs `homectl firstboot --prompt-new-user`, which drops into
+an interactive console wizard when no credential is present — an unattended
+hang on a headless first boot. A drop-in strips that flag, exactly as
+`systemd-firstboot.service.d/` already had to for `--prompt-root-password`.
+
+`myosi user-create` remains the path for a host that is already running.
+
+### Networking: NetworkManager and resolved, not networkd
+
+`network.dns` and `network.search_domains` work — `systemd-resolved.service`
+imports them and they set *global* DNS, which coexists with the per-link DNS
+NetworkManager pushes in. That is the hook for a custom resolver on your own
+network: ship a default in `/usr/lib/credstore/network.dns`, override per host
+from the ESP.
+
+`network.network.*`, `network.link.*` and `network.netdev.*` are **inert**.
+They generate `systemd-networkd` configuration and myosi has no networkd
+installed. That is deliberate and not worth changing: networkd has no Wi-Fi
+management at all, so adopting it would mean adding `iwd`/`wpa_supplicant` and
+losing `nm-applet`. NetworkManager and resolved are complementary here and
+already wired together — `/usr/lib/NetworkManager/conf.d/00-myosi.conf` sets
+`dns=systemd-resolved`, and `/etc/resolv.conf` is the resolved stub.
+
+For a declarative static address, drop a NetworkManager keyfile through
+`tmpfiles.extra` instead; the example is in `credentials/tmpfiles.extra`. Mode
+must be `0600` or NetworkManager ignores the file.
 
 ### What this costs you
 
