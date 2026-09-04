@@ -79,7 +79,7 @@ Slot sizes are pinned (`SizeMinBytes=SizeMaxBytes`) so systemd-repart's build an
 | `myosi_VERSION_ARCH_<VERITY_UUID>.verity.raw.zst` | Verity hash partition for sysupdate. UUID is the LAST 16 bytes of the root hash. Same `@u` mechanism. |
 | `myosi_VERSION_ARCH.verity-sig.raw.zst` | Verity signature partition |
 | `containers_VERSION_ARCH.raw` | Sysext: Podman, Distrobox, Compose, Skopeo, Incus + container-selinux baked into base policy |
-| `desktop_VERSION_ARCH.raw` | Sysext: Niri, audio, apps. Lists no font packages — the user installs fonts into `~/.local/share/fonts` (`myenv install-fonts`); only GTK's dependency fonts come along as a fallback. |
+| `desktop_VERSION_ARCH.raw` | Sysext: Niri, audio, apps, and qutebrowser as the primary browser — its QtWebEngine links the system ffmpeg, so this sysext also carries RPM Fusion's full `ffmpeg` (see the codec stack section). Lists no font packages — the user installs fonts into `~/.local/share/fonts` (`myenv install-fonts`); only GTK's dependency fonts come along as a fallback. |
 | `virt_VERSION_ARCH.raw` | Sysext: libvirt, qemu, vfio, virt-manager |
 | `nvidia_VERSION_ARCH.raw` | Sysext: NVIDIA `current` (595.x open kernel modules, Turing+ — RTX 16xx/20xx/30xx/40xx/50xx). All `nvidia*.ko` signed with `boot.key`. |
 | `nvidia-580xx_VERSION_ARCH.raw` | Sysext: NVIDIA `580xx` legacy proprietary modules (Maxwell / Pascal / Volta — GTX 9xx/10xx, Titan V). All `nvidia*.ko` signed with `boot.key`. |
@@ -221,6 +221,101 @@ generation's raws next to the current ones, the reboot into the new
 root slot selects the new sysexts, and a rollback (sd-boot menu or
 boot-counting) into the old slot re-selects the old sysexts — kernel
 modules always match the booted kernel.
+
+### Sysext layer order shadows files, not just packages
+
+The merged `/usr` is one overlayfs whose lowerdirs are the enabled
+sysexts **sorted by name**, with the verity root last:
+
+```
+lowerdir=/run/systemd/sysext/meta/usr
+        :/run/systemd/sysext/extensions/nvidia_<VER>_<ARCH>/usr
+        :/run/systemd/sysext/extensions/desktop_<VER>_<ARCH>/usr
+        :/usr
+```
+
+Earlier entries win. Nothing about that order is semantic — `nvidia`
+sits above `desktop` because "n" sorts after "d". So whenever two
+sysexts carry the same path, the alphabetically later name silently
+decides which file the whole system sees, and `st_dev` is the only way
+to tell them apart at runtime:
+
+```bash
+stat -c '%D %n' /usr/lib64/libavcodec.so.62 /usr/bin/ffmpeg
+```
+
+This bit us with codecs. Every sysext is built over the same
+`base-tree`, so any build-time dependency chain that pulls a Fedora
+package into a *second* sysext creates a duplicate — usually harmless,
+because both resolve to the same Fedora build. It stops being harmless
+the moment one sysext deliberately replaces a Fedora package: see the
+next section.
+
+### The codec stack: full ffmpeg, and why it needs guarding
+
+Fedora's `ffmpeg-free` / `libav*-free` are built with an explicit
+`--enable-decoder=` allowlist that omits `h264` and `hevc`, and the
+base image's `noopenh264` is, by its own summary, a *"Fake
+implementation of the OpenH264 library"*. Two image-side decisions undo
+that:
+
+- **base** ships Cisco's real `openh264` (repo file in
+  `mkosi.sandbox/`), which `Obsoletes: noopenh264`. Narrow but real:
+  `libQt6WebEngineCore.so` imports `WelsCreateSVCEncoder` /
+  `WelsDestroySVCEncoder` and none of the decoder entry points, so
+  openh264 is the browser's **WebRTC H.264 encoder** and nothing else —
+  playback decoding is `libavcodec`'s native `h264` throughout.
+- **desktop** swaps `ffmpeg-free` for RPM Fusion's `ffmpeg` in its
+  `mkosi.postinst` — `--allowerasing`, because both Provide `ffmpeg`
+  and `Packages=` has no per-package erase.
+
+This matters far beyond the `ffmpeg` CLI: Fedora's `qt6-qtwebengine`
+links the **system** `libavcodec.so.62` / `libavformat.so.62` /
+`libavutil.so.60`, so a QtWebEngine browser's H.264 and AAC support is
+exactly whatever `libavcodec` the merged `/usr` resolves to. Chromium-based
+engines report the loss as "unsupported browser" on video sites, which
+reads like a user-agent problem and is not one.
+
+The trap: `nvidia-settings` pulls in GTK, and with it `libheif`,
+`libchromaprint` and localsearch's `libextract-libav.so` — all real
+`NEEDED` consumers of `libavcodec` / `libavformat` / `libavutil` /
+`libswresample`. The **nvidia** sysext therefore acquires its own
+`-free` copies, and by the layer rule above those shadowed the desktop
+sysext's RPM Fusion ones. The visible state was a mixed stack:
+`/usr/bin/ffmpeg`, `libavfilter`, `libswscale` from `desktop`;
+`libavcodec` from `nvidia`; no H.264 or HEVC decoder anywhere.
+
+Two guards now make that loud instead of silent:
+
+- `swap_buildroot_ffmpeg_free` (in `mkosi.shared/sysext-build.sh`, run
+  from `sysext_finalize`) replaces Fedora's `-free` ffmpeg with RPM
+  Fusion's `ffmpeg-libs` in **any** sysext that ends up with it, and
+  fails the build if one survives. It swaps rather than removes: a
+  sysext enabled without `desktop` still needs a working `libavcodec`
+  for whatever pulled it in.
+- The desktop `mkosi.postinst` asserts `ffmpeg-libs` is installed after
+  its swap. That package exists only in RPM Fusion, so its presence
+  proves the swap did not quietly resolve back to Fedora — which it
+  would, without noise, whenever a mirror hiccup trips
+  `skip_if_unavailable=True` in `mkosi.sandbox/etc/yum.repos.d/`.
+
+To check a running host:
+
+```bash
+ffmpeg -hide_banner -h decoder=hevc   # must NOT say "no decoders ... available"
+ffmpeg -hide_banner -decoders | grep -w h264
+```
+
+In qutebrowser, `qute://version` and `chrome://gpu` report the
+QtWebEngine/Chromium build and whether rasterisation, WebGL and video
+decode are hardware accelerated.
+
+qutebrowser costs the desktop sysext about **440 MB installed**, 291 MB
+of which is `qt6-qtwebengine` — the largest single entry in the desktop
+package set. Twitch may still serve an "unsupported browser" page after
+the codecs are fixed, because it allowlists user agents; that is a
+per-site `content.headers.user_agent` override in the user's own
+`~/.config/qutebrowser/config.py`, not an image concern.
 
 ### Kernel-module sysexts + the depmod overlay
 

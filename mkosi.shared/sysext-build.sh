@@ -95,6 +95,50 @@ strip_buildroot_dnf() {
     chroot "$buildroot" rpm -e --nodeps --noscripts $pkgs 2>/dev/null || true
 }
 
+# Fedora's ffmpeg *-free packages ship a libavcodec configured with an
+# explicit --enable-decoder= allowlist that omits h264 and hevc. The
+# desktop sysext deliberately replaces them with RPM Fusion's full
+# build, but systemd-sysext orders the overlay lowerdirs by NAME:
+#   lowerdir=.../nvidia/usr:.../desktop/usr:/usr
+# so `nvidia` sits ABOVE `desktop`. nvidia-settings drags in GTK, and
+# with it libheif, libchromaprint and localsearch's libav extractor —
+# real NEEDED consumers of libavcodec/libavformat/libavutil/
+# libswresample. The -free libs therefore land in that sysext and
+# shadow the desktop sysext's RPM Fusion copies, leaving the whole
+# host without H.264/HEVC —
+# including QtWebEngine, which links the SYSTEM libavcodec, so every
+# Qt browser reported "unsupported browser" on video sites while
+# /usr/bin/ffmpeg (unshadowed, from the desktop layer) looked fine.
+#
+# Swap rather than remove: a sysext enabled WITHOUT desktop still needs
+# a working libavcodec for whatever pulled it in, and rpm -e would have
+# to break those dependencies. RPM Fusion's package names carry no
+# -free suffix, so a sysext that already ships the full stack is a
+# no-op here.
+swap_buildroot_ffmpeg_free() {
+    local buildroot="${BUILDROOT:?BUILDROOT must be set by mkosi}"
+    [ -d "$buildroot/usr/lib/sysimage/rpm" ] || [ -d "$buildroot/var/lib/rpm" ] || return 0
+
+    local free
+    free=$(chroot "$buildroot" rpm -qa --queryformat '%{NAME}\n' 2>/dev/null \
+        | grep -E '^(ffmpeg|libav[a-z]+|libpostproc|libsw[a-z]+)-free$' \
+        | sort -u || true)
+    [ -n "$free" ] || return 0
+
+    echo "sysext-build: replacing Fedora ffmpeg with RPM Fusion: $(echo "$free" | tr '\n' ' ')"
+    stage_sandbox_repos
+    dnf5 --installroot="$buildroot" --nogpgcheck install -y --allowerasing ffmpeg-libs
+
+    local left
+    left=$(chroot "$buildroot" rpm -qa --queryformat '%{NAME}\n' 2>/dev/null \
+        | grep -E '^(ffmpeg|libav[a-z]+|libpostproc|libsw[a-z]+)-free$' \
+        | sort -u || true)
+    if [ -n "$left" ]; then
+        echo "sysext-build: codec-crippled ffmpeg survived the swap: $(echo "$left" | tr '\n' ' ')" >&2
+        return 1
+    fi
+}
+
 # Versioned extension-release filenames let two versions of a sysext
 # coexist in /var/lib/extensions/ (current + last-good): systemd-sysext
 # groups by IMAGE_ID and merges only the highest version. Unversioned
@@ -159,6 +203,9 @@ sysext_write_extension_release() {
 # invoking the `final` stage.
 sysext_finalize() {
     [ "${1:-final}" = "final" ] || exit 0
+    # Before strip_buildroot_dnf: the swap needs the sandbox repos and a
+    # working dnf5 transaction against the buildroot.
+    swap_buildroot_ffmpeg_free
     strip_buildroot_dnf
     stage_sysext_policy
     strip_to_sysext_layout
