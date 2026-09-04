@@ -116,15 +116,23 @@ myosi/
 ├── mkosi.extra/             # files copied verbatim into the image
 │   ├── etc/                 # /etc baseline -> snapshotted to /usr/share/factory/etc (the overlay lower)
 │   └── usr/                 # /usr baseline (sysctl.d, udev rules, sysupdate, libexec, ...)
+├── mkosi.profiles/          # containers/desktop/virt: Packages= + mkosi.extra, shared by
+│                              the baked --profile= build and the sysext of the same name
+├── mkosi.sandbox/           # build-time-only dnf config + third-party repo files
+│                              (RPM Fusion, COPR, Cisco openh264, nvidia-container-toolkit);
+│                              never deployed into the image
 ├── mkosi.repart/            # build-time partition defs (4: ESP + root-A + verity-A + verity-sig-A) — mkosi auto-discovers
 ├── mkosi.extra/usr/lib/repart.d/ # runtime/first-boot expansion layout (8 partitions: build set + root-B + verity-B + verity-sig-B + data-luks)
-├── mkosi.prepare            # script run before package install (cert copy)
-├── mkosi.postinst           # script run after package install (service enable, version stamp)
-├── packages/                # build metadata, e.g. pinned-kernel.txt for NVIDIA sysext iteration
+├── mkosi.postinst           # main-image postinst: SELinux module, signing certs to
+│                              /usr/share/myosi/keys + /efi/keys, LUKS bootstrap key
+├── mkosi.finalize           # snapshots /etc to /usr/share/factory/etc, then wipes /etc
+├── mkosi.version            # resolves the calver ImageVersion (counter cache, 300s TTL)
+├── mkosi.local.conf.example # template for untracked host/build overrides
 ├── keys/                    # signing key staging directory (gitignored key material)
-├── scripts/                 # host-side build/CI helpers (generate-keys, decode-keys,
-│                              stage-artifacts, sysupdate-manifest)
-├── .github/workflows/      # GitHub Actions release workflow
+├── scripts/                 # host-side build/CI helpers: generate-keys, generate-bootstrap-key,
+│                              decode-keys, stage-artifacts, sysupdate-manifest,
+│                              vm-boot-test + vm-test-assertions
+├── .github/workflows/       # build.yml (release) + vm-test.yml (first-boot test)
 └── justfile                 # all developer + operator commands
 ```
 
@@ -1865,6 +1873,276 @@ sudo dmesg | grep -iE 'verity|enokey' || true
 
 ---
 
+## Installing into a VM (qcow2, Secure Boot, our keys)
+
+The release `.raw` is a whole disk image, so a VM install is the same
+operation as the hardware install above with `qemu-img` standing in for
+`dd`: convert, grow, hand the firmware our two certificates, boot.
+First-boot `systemd-repart` does the rest — it creates the B slots and
+grows `data-luks` into whatever disk it finds (step 3b,
+*Disk fills itself automatically on first boot*).
+
+`just vm` already boots the build tree under Secure Boot for a quick
+look, and `scripts/vm-boot-test.sh` builds a throwaway VM to assert
+first-boot behaviour. This section is the other case: a VM you keep,
+snapshot, and update like a real host.
+
+**The certificates must be the pair that signed the image you are
+booting.** A freshly generated keypair will not validate a downloaded
+release. On any running myosi host they are at
+`/usr/share/myosi/keys/{boot,image}.crt`; on a build host they are
+`keys/boot.crt` and `keys/image.crt`.
+
+### What the host needs
+
+`qemu-img`, `qemu-system-x86_64`, `swtpm`, `edk2-ovmf` and `podman` — all
+present on a myosi host through the baked `virt` and `containers`
+profiles. Plus the certificate pair named above.
+
+### The disk
+
+```bash
+# From a release…
+gh release download 2026.09.03.01 -R <owner>/myosi -p 'myosi_*_x86-64.raw.zst'
+zstd -d myosi_2026.09.03.01_x86-64.raw.zst -o myosi.raw
+
+# …or from a local build
+zstd -d build/myosi_*_x86-64.raw.zst -o myosi.raw
+
+qemu-img convert -f raw -O qcow2 myosi.raw myosi.qcow2
+qemu-img resize myosi.qcow2 64G
+rm myosi.raw
+```
+
+The shipped raw carries only ESP + root-A + verity-A + verity-sig-A. The
+resize is what gives repart room for the B slots and `data-luks`; below
+~12 GiB there is nowhere to put them.
+
+### The firmware varstore, carrying both certificates
+
+```bash
+mkdir -p vm && cd vm
+cp /usr/share/myosi/keys/boot.crt /usr/share/myosi/keys/image.crt .
+
+qemu-img convert -O raw \
+    /usr/share/edk2/ovmf/OVMF_VARS_4M.secboot.qcow2 vars-template.fd
+```
+
+Start from the `.secboot` template, not the blank `OVMF_VARS_4M.qcow2`:
+it already holds the Microsoft KEK/db that Fedora's signed shim chains to
+(`ShimBootloader=signed`), and enrolling into the blank store yields a db
+OVMF ignores. Convert to raw because `virt-fw-vars` reads and writes raw
+varstores while Fedora 44 ships the 4M firmware as qcow2.
+
+```bash
+podman run --rm -v "$PWD:/w:z" -w /w registry.fedoraproject.org/fedora:44 bash -c '
+dnf install -y -q python3-virt-firmware
+G=$(cat /proc/sys/kernel/random/uuid)
+virt-fw-vars --input vars-template.fd --output myosi_VARS.fd \
+    --set-pk  "$G" boot.crt \
+    --add-kek "$G" boot.crt \
+    --add-db  "$G" boot.crt \
+    --add-db  "$G" image.crt \
+    --secure-boot'
+```
+
+In a container because `python3-virt-firmware` is not in the myosi image
+and the root is read-only; `pip install virt-firmware` fails against the
+image's Python 3.14 (no `crypt_r` wheel). `--set-pk` replaces PK only —
+`--add-kek` and `--add-db` append, so the vendor keys from the template
+survive. On a build host that has run `scripts/generate-keys.sh`,
+`keys/OVMF_VARS-enrolled.fd` is already exactly this file.
+
+**Both certificates go into db**, for the two different checks described in
+step 3c (*Enroll signing certificates for Secure Boot, verity and
+sysexts*). `boot.crt` is what the firmware validates sd-boot and the UKI
+against. `image.crt` is the one the kernel copies into `.platform`, which
+is the keyring every sysext signature is checked against.
+
+Enrolling `boot.crt` alone still boots the base image — that is exactly
+what `scripts/vm-boot-test.sh` does, and the roothash travels inside the
+UKI that `boot.crt` signs, so the verity root maps without consulting
+`.platform`. The gap shows up the first time you enable a sysext: the
+merge fails with `key is not available` and the feature simply is not
+there. Enroll both now rather than debugging that later.
+
+### Booting it with plain qemu
+
+```bash
+mkdir -p tpm
+swtpm socket --tpmstate dir=tpm --ctrl type=unixio,path=tpm/sock --tpm2 -d
+
+qemu-system-x86_64 \
+  -machine q35,smm=on -accel kvm -cpu host -smp 4 -m 4G \
+  -global driver=cfi.pflash01,property=secure,value=on \
+  -global ICH9-LPC.disable_s3=1 \
+  -drive if=pflash,unit=0,format=qcow2,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE_4M.secboot.qcow2 \
+  -drive if=pflash,unit=1,format=raw,file=myosi_VARS.fd \
+  -drive if=virtio,format=qcow2,file=../myosi.qcow2 \
+  -chardev socket,id=chrtpm,path=tpm/sock \
+  -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-crb,tpmdev=tpm0 \
+  -netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22 \
+  -device virtio-net-pci,netdev=n0 \
+  -display gtk
+```
+
+`smm=on` together with `driver=cfi.pflash01,property=secure,value=on` is
+not optional: without SMM the varstore stays writable from the guest and
+Secure Boot is advisory rather than enforced. `disable_s3=1` because S3
+resume and a locked-down pflash do not mix. The 4M code file pairs only
+with a 4M varstore — the 2M `OVMF_VARS.fd` is silently rejected and the
+firmware falls through to "No bootable option".
+
+The TPM is not needed to boot — `data-luks` unlocks from the baked
+key-file first — but step 3d's `systemd-cryptenroll --tpm2-device` needs
+one, so attach it now rather than redefining the VM later.
+
+Swap `-display gtk` for `-display none -serial mon:stdio` to run it
+headless on the terminal you launched it from.
+
+### Or defining it in libvirt
+
+```bash
+# still in vm/ from the previous step
+sudo cp ../myosi.qcow2 /var/lib/libvirt/images/myosi.qcow2
+sudo cp myosi_VARS.fd  /var/lib/libvirt/qemu/nvram/myosi_VARS.fd
+sudo restorecon -v /var/lib/libvirt/images/myosi.qcow2 \
+                   /var/lib/libvirt/qemu/nvram/myosi_VARS.fd
+
+sudo virt-install \
+  --name myosi --memory 4096 --vcpus 4 --cpu host-passthrough \
+  --machine q35 --features smm.state=on \
+  --boot loader=/usr/share/edk2/ovmf/OVMF_CODE_4M.secboot.qcow2,loader.type=pflash,loader.format=qcow2,loader.readonly=yes,loader.secure=yes,nvram=/var/lib/libvirt/qemu/nvram/myosi_VARS.fd,nvram.format=raw \
+  --tpm backend.type=emulator,backend.version=2.0,model=tpm-crb \
+  --disk path=/var/lib/libvirt/images/myosi.qcow2,format=qcow2,bus=virtio \
+  --network network=default --graphics spice --video virtio \
+  --osinfo fedora-unknown --import --noautoconsole
+```
+
+`nvram=` uses our enrolled store in place; `nvram.template=` instead makes
+libvirt copy it per domain. `restorecon` matters — an nvram or disk file
+carrying a scratch-directory label is denied by svirt with an error that
+reads like a firmware problem. Needs `virtqemud.socket` (or `libvirtd`)
+running and the `default` network active; both come with the `virt`
+profile (step 3j).
+
+### Getting in on the first boot
+
+The image ships no authorized keys. Either use the console bootstrap
+credential and follow step 3a to create your user and lock root, or hand the
+VM a key at launch — `tmpfiles.d/myosi.conf` consumes the
+`ssh.authorized_keys.root` system credential, so no image change is
+needed:
+
+```bash
+# qemu: one more flag on the command line above
+-smbios type=11,value=io.systemd.credential.binary:ssh.authorized_keys.root=$(base64 -w0 < ~/.ssh/id_ed25519.pub)
+```
+
+```bash
+# virt-install: same credential as an SMBIOS OEM string
+--sysinfo type=smbios,oemStrings.entry0="io.systemd.credential.binary:ssh.authorized_keys.root=$(base64 -w0 < ~/.ssh/id_ed25519.pub)"
+```
+
+The equivalent domain XML, if the `--sysinfo` shorthand fights you:
+
+```xml
+<sysinfo type='smbios'>
+  <oemStrings>
+    <entry>io.systemd.credential.binary:ssh.authorized_keys.root=BASE64</entry>
+  </oemStrings>
+</sysinfo>
+```
+
+Then `ssh -p 2222 root@127.0.0.1` for the qemu form, or the address
+`virsh domifaddr myosi` reports for the libvirt form.
+
+### What the first boot is doing
+
+There is no `quiet` on the cmdline, so this is all visible. In order:
+sd-boot validates the UKI against db → the initrd's `systemd-veritysetup`
+maps the signed erofs root → `systemd-repart` creates root-B, verity-B and
+verity-sig-B and grows `data-luks` to fill the disk → `myosi-data-attach`
+unlocks it with the baked key-file → the three initrd units assemble the
+`/etc` overlay → `switch_root` → `var.mount`, `home.mount`, `srv.mount`.
+
+It is markedly slower than every later boot. `systemd-tpm2-setup.service`
+failing here is expected — `scripts/vm-test-assertions.sh` allowlists it as
+a known first-boot failure — and is not worth chasing.
+
+### Turning it into a real host
+
+Identical to hardware, and the reasoning behind each line is in step 3a.
+At the console as `root` / `changeme`:
+
+```bash
+myosi user-create <you> homed 1000 wheel,video,render,input,kvm
+homectl passwd <you>
+# log in as <you> on Ctrl-Alt-F2 and confirm it works BEFORE the next line
+passwd -l root
+hostnamectl hostname myosi-vm
+```
+
+Verify that second login first. Locking root with no working user leaves a
+VM in the same place it leaves a laptop: reinstall.
+
+### Verifying the trust chain inside the guest
+
+```bash
+bootctl status | head -20
+sudo mokutil --sb-state
+sudo keyctl list %:.platform
+findmnt -no SOURCE,FSTYPE /usr
+sudo veritysetup status root
+systemd-sysext status
+sudo dmesg | grep -iE 'verity|enokey' || true
+```
+
+Expected: Secure Boot enabled, both `myosi … Boot` and `myosi … Image`
+present in `.platform`, `/usr` on erofs over `/dev/mapper/root`, and no
+`ENOKEY`. Check the keyring specifically rather than concluding from a
+successful boot — a missing image cert costs you sysexts, not the boot.
+
+Sysexts are not in the disk image; add them the same way a hardware host
+does (step 3e), or drop the raws into `/var/lib/extensions/` over SSH.
+
+### Sysexts in a VM
+
+Nothing optional ships in the disk image. With the guest on the network,
+`extension-enable` pulls the asset matching the booted `IMAGE_VERSION`
+straight from the public release over HTTPS (step 3e):
+
+```bash
+sudo myosi extension-enable containers
+sudo myosi extension-enable virt
+sudo reboot
+```
+
+Two VM-specific judgements. **Skip `nvidia`** — there is no GPU to drive,
+and it is the sysext whose ffmpeg libraries shadow `desktop`'s. **`desktop`
+merges cleanly but wants working GL** for niri, so it needs
+`-device virtio-vga-gl -display gtk,gl=on` and is better treated as its own
+experiment than as part of getting the VM up.
+
+### Updates and rollback
+
+```bash
+sudo myosi update && sudo reboot
+```
+
+The same A/B model as hardware (step 3f): the new root lands in the
+inactive slot, the UKI is written last with boot-counting armed, and sysext
+versions stage into the store without touching the running overlay.
+Rollback is the sd-boot menu, and the old slot re-selects the old sysexts.
+
+qcow2 snapshots sit **underneath** all of that. `qemu-img snapshot -c` or
+`virsh snapshot-create-as` rolls back both slots, the ESP and `data-luks`
+together, so it is a fine "back to before I broke it" button but is not the
+A/B rollback and should not be reasoned about as one. Take them with the VM
+powered off.
+
+---
+
 ## Upgrading an existing host to the sysext store model (one-time)
 
 Hosts deployed before the store + selector model have (a) sysext raws as
@@ -2418,20 +2696,25 @@ nothing in the *current* tmpfiles.d would produce. Only a disk that has
 never booted before tells the truth, and every run starts from a fresh
 qcow2 built from the image.
 
-The control channel is SSH over `AF_VSOCK`, not the console. The image
-already ships `systemd-ssh-generator`, and `tmpfiles.d/myosi.conf` already
+The control channel is SSH, not the console. `tmpfiles.d/myosi.conf`
 consumes the `ssh.authorized_keys.root` system credential, so QEMU hands
 the VM a throwaway public key at launch via SMBIOS type 11 and the script
 gets a real shell — no console scraping, no image changes:
 
 ```
 -smbios type=11,value=io.systemd.credential.binary:ssh.authorized_keys.root=<base64>
--device vhost-vsock-pci,guest-cid=<cid>
+-netdev user,id=n0,hostfwd=tcp:127.0.0.1:<port>-:22
 ```
 
-Reaching vsock from ssh needs either `socat` (what CI installs) or
-`systemd-ssh-proxy` (already on any myosi host, and it needs
-`ProxyUseFdpass=yes` because it passes a descriptor rather than a stream).
+It reaches that sshd over a **forwarded TCP port** out of QEMU's user-mode
+network. It used to use `AF_VSOCK`, which needed no port, and that broke
+twice for reasons that had nothing to do with the image: `/dev/vhost-vsock`
+is root-only on a stock runner, and selinux-policy 44.7 denies AF_VSOCK
+socket activation outright, so sshd accepted the connection and never wrote
+its banner. TCP depends on nothing but the NIC the VM already had, and no
+`socat` / `systemd-ssh-proxy` hop. The port is picked free at random per
+run, because a fixed one silently hands the run to whatever already answers
+there — which is how a stray host sshd once passed itself off as the guest.
 
 `scripts/vm-test-assertions.sh` runs inside the guest and checks SELinux
 enforcement and a zero AVC count, the label on every path whose `t` line
@@ -2442,8 +2725,12 @@ known first-boot failure so the job reports regressions rather than a
 standing red.
 
 Locally: `SB_CERT=keys/boot.crt ./scripts/vm-boot-test.sh build/myosi_*.raw.zst`
-enrolls the signing cert as PK/KEK/db with `virt-fw-vars` and boots with
-Secure Boot; without `SB_CERT` it boots unsigned. `KEEP=1` leaves the VM up.
+enrolls that one cert as PK/KEK/db with `virt-fw-vars` and boots with Secure
+Boot; without `SB_CERT` it boots unsigned. `KEEP=1` leaves the VM up.
+
+It enrolls `boot.crt` only, which is all the base image needs — the roothash
+travels inside the UKI that `boot.crt` signs. A VM you intend to enable
+sysexts on needs `image.crt` in db as well; see *Installing into a VM*.
 
 ### Container storage layout
 
@@ -2856,8 +3143,8 @@ An earlier overlay attempt was retired, but its problems were all properties of 
 **Why isn't `/var` mounted in the initrd?**
 Nothing in the initrd phase reads `/var`, and `systemd-gpt-auto-generator` already emits `var.mount` post-pivot from the DPS `Type=var` partition. With `DefaultSubvolume=/var` in `90-data.conf`, the auto-generated mount uses the correct btrfs subvolume automatically. Same lifecycle as `home.mount` and `srv.mount`. `/etc` is the special case — PID 1 reads `/etc/selinux/config` + `/etc/systemd/system.conf` synchronously at startup, so the mount must fire before pivot.
 
-**Why is there a single `install.sh` for USB flashing AND disk install?**
-Writing a myosi image to a USB stick and installing it on an internal disk are the same operation: `dd` a full GPT image to a block device. The earlier split between `flash-usb.sh` and `install-to-disk.sh` was duplication. One script (`install/install.sh`, surfaced as `just install <device> [<source>]`) auto-detects the source (repo `build/`, `/run/myosi-installer/`, or the live disk itself when run inside a booted USB) and writes whatever destination you point at.
+**Why is there a single install script for USB flashing AND disk install?**
+Writing a myosi image to a USB stick and installing it on an internal disk are the same operation: `dd` a full GPT image to a block device. The earlier split between `flash-usb.sh` and `install-to-disk.sh` was duplication. One script (`mkosi.extra/usr/libexec/myosi/install`, shipped into the image at `/usr/libexec/myosi/install` and surfaced as `just install <device> [<source>]`) auto-detects the source (repo `build/`, `/run/myosi-installer/`, or the live disk itself when run inside a booted USB) and writes whatever destination you point at.
 
 **Why are signing certs shipped at `/usr/share/myosi/keys/` in both PEM and DER?**
 PEM (`*.crt`) is the canonical OpenSSL-readable form (`openssl x509 -in ... -noout -text`). DER (`*.der`) is what `mokutil --import` requires — the tool rejects PEM with a generic `not a valid x509 certificate in DER format`. `mkosi.postinst` derives the DER once at build time via `openssl x509 -outform DER` so the operator never has to convert anything to enroll a cert. The base image also includes `openssl` for the operator's own conversion needs.
