@@ -1873,6 +1873,178 @@ sudo dmesg | grep -iE 'verity|enokey' || true
 
 ---
 
+## Configuring a host before its first boot (ESP credentials)
+
+A headless install has a bootstrap problem: the public image ships **no
+authorized keys**, and the two `AuthorizedKeysFile` sources that would
+normally hold one — `~/.ssh/authorized_keys` and
+`/etc/ssh/authorized_keys.d/%u` — both live on `data-luks`, which
+`systemd-repart` does not create until the machine has already booted
+once. So on a fresh disk there are exactly two doors: rebuild the image,
+or hand the key in as a **system credential**.
+
+Credentials are the right door, because they can be delivered by writing
+one file to a vfat partition from any laptop — no rebuild, no network, no
+console, per host.
+
+### How the credential actually arrives
+
+`systemd-stub` is the EFI entry point compiled into every myosi UKI
+(`UnifiedKernelImages=auto`). Before it hands control to the kernel it
+scans the ESP it was loaded from and packs what it finds into a synthetic
+cpio archive, which it registers through the EFI initrd protocol so the
+kernel unpacks it on top of the real initrd:
+
+| ESP directory | unpacks to | scope |
+|---|---|---|
+| `loader/credentials/*.cred` | `/.extra/global_credentials/` | whole boot partition |
+| `EFI/Linux/<uki>.efi.extra.d/*.cred` | `/.extra/credentials/` | that one UKI |
+
+PID 1 then imports both directories into `/run/credentials/@system/`,
+with the per-UKI directory taking precedence, and drops the `.cred`
+suffix on the way. `/run` survives `switch_root`, so the real system sees
+what the initrd imported.
+
+**Use the global directory.** `Output=%i_%v_%a` means the UKI is named
+`myosi_<VER>_<ARCH>.efi` and that name changes with every release, so a
+per-UKI `.extra.d/` directory would be silently orphaned by the first
+`myosi update`. `loader/credentials/` is version-independent.
+
+No configuration enables any of this — the scan is unconditional, and
+`.cred` is the only suffix it matches.
+
+### What myosi does with `ssh.authorized_keys.root`
+
+Three independent consumers, which is why one delivery is enough:
+
+1. `sshd_config.d/50-myosi.conf` lists
+   `/run/credentials/@system/ssh.authorized_keys.%u` in
+   `AuthorizedKeysFile`, so sshd reads the credential directly.
+2. `tmpfiles.d/myosi.conf` has
+   `f^ /etc/ssh/authorized_keys.d/root 0600 root root - ssh.authorized_keys.root`,
+   which copies it onto the `/etc` overlay on first boot — **the key
+   becomes permanent even if you later delete the file from the ESP**.
+3. systemd's own shipped tmpfiles write it to `/root/.ssh/authorized_keys`
+   when that file is absent.
+
+`PermitRootLogin prohibit-password` is already set, so a root key alone is
+enough to reach a headless box; everything else can be done over SSH.
+
+### Injecting into the image before writing it
+
+Personalises one image you can then write to any number of machines. This
+also makes the **installer USB itself** reachable — the USB is the image,
+so you can SSH into the live installer and run `myosi install
+/dev/nvme0n1` from your laptop, which is what removes the last need for a
+console.
+
+```bash
+zstd -d myosi_<VER>_x86-64.raw.zst -o myosi.raw
+
+LOOP=$(sudo losetup --find --show --partscan myosi.raw)
+sudo mkdir -p /mnt/esp
+sudo mount "${LOOP}p1" /mnt/esp          # ESP is always partition 1
+
+sudo mkdir -p /mnt/esp/loader/credentials
+sudo cp ~/.ssh/id_ed25519.pub \
+        /mnt/esp/loader/credentials/ssh.authorized_keys.root.cred
+
+sudo umount /mnt/esp
+sudo losetup -d "$LOOP"
+
+sudo just install /dev/sdX myosi.raw
+```
+
+### Injecting into a disk that is already written
+
+Simpler — no loop device — and lets each machine differ:
+
+```bash
+sudo just install /dev/sdX
+sudo mount /dev/sdX1 /mnt/esp
+sudo mkdir -p /mnt/esp/loader/credentials
+sudo cp ~/.ssh/id_ed25519.pub \
+        /mnt/esp/loader/credentials/ssh.authorized_keys.root.cred
+sudo umount /mnt/esp
+```
+
+The ESP stays writable on a running host too (`/efi`), so this is also how
+you add a second admin key later without touching the image.
+
+### Naming the files
+
+The filename minus `.cred` becomes the credential name, and it must pass
+systemd's `credential_name_valid()` — `filename_is_valid()` **and**
+`fdname_is_valid()`:
+
+- printable ASCII only, no `/`, no `:`
+- not `.` or `..`, not empty
+- at most 255 characters
+- no leading `.` (sd-stub skips dotfiles), and not a directory
+
+The convention is a dotted namespace, `<subsystem>.<setting>` with the
+target appended for per-user settings — `ssh.authorized_keys.<username>`,
+`passwd.hashed-password.<username>`. Useful well-known names:
+
+| credential | effect |
+|---|---|
+| `ssh.authorized_keys.<user>` | authorized keys for that user |
+| `passwd.hashed-password.<user>` | set a password (UNIX hash) |
+| `passwd.shell.<user>` | login shell |
+| `firstboot.hostname` | static hostname, first boot only |
+| `system.hostname` | transient hostname, applied each boot |
+| `system.machine_id` | pin the machine ID |
+| `firstboot.locale`, `firstboot.timezone`, `firstboot.keymap` | locale/tz/keymap |
+| `network.dns`, `network.search_domains`, `network.hosts` | resolver + `/etc/hosts` |
+| `tmpfiles.extra` | extra tmpfiles.d lines applied at boot |
+
+Multiple SSH keys go in one file, one per line — it is `authorized_keys`
+format, not one file per key.
+
+**Hostname does not work here yet.** `mkosi.conf` sets `Hostname=myosi`,
+so `/etc/hostname` is baked into the factory tree and shows through the
+`/etc` overlay from the very first boot. `systemd-firstboot` only fills in
+values that are *unset*, so `firstboot.hostname` is a no-op on this image
+— the drop-in comment in
+`systemd-firstboot.service.d/` overstates what still applies. Naming a
+headless host is a `hostnamectl` call over SSH for now. Making the
+credential work would mean dropping `Hostname=` and setting
+`DEFAULT_HOSTNAME=myosi` in `os-release` instead, which is a change to the
+image, not to this procedure.
+
+### What this costs you
+
+**It is unsigned.** Today, physical write access to the ESP does not get
+an attacker root — Secure Boot rejects a tampered UKI. This path changes
+that: drop a `.cred`, get root SSH on the next boot. That is an acceptable
+trade for machines you physically control and a poor one for machines you
+do not. The integrity-preserving alternative is a UKI addon signed with
+`boot.key` in `loader/addons/`, which sd-stub validates against Secure
+Boot before loading.
+
+**It is plaintext on vfat.** A public key belongs there. Anything secret
+belongs in `/etc/credstore.encrypted` with TPM binding instead.
+
+**It moves PCR 12.** sd-stub measures the credential cpio into PCR 12
+(`kernel-config`, alongside the kernel command line). The `data-luks`
+TPM2 policy binds PCR 7+14, so this is inert today — see the keyslot
+section for why coupling the two is a trap on headless hosts.
+
+**It does not touch the trust chain.** dm-verity covers `root-a` only, and
+the UKI is a signed PE you are not modifying. Adding a file to the ESP
+requires no re-signing.
+
+### Verifying it landed
+
+```bash
+systemd-creds list                       # ssh.authorized_keys.root present
+ls /run/credentials/@system/
+ls /.extra/                              # only visible from the initrd
+cat /etc/ssh/authorized_keys.d/root      # the tmpfiles copy, after first boot
+```
+
+---
+
 ## Installing into a VM (qcow2, Secure Boot, our keys)
 
 The release `.raw` is a whole disk image, so a VM install is the same
