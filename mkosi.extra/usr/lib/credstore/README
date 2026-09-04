@@ -1,0 +1,24 @@
+Image-default system credentials.
+
+systemd assembles its credential search path as (exec-credential.c,
+credential_search_path), first match winning:
+
+    /run/credentials/@system/   ESP loader/credentials, SMBIOS, qemu
+    /etc/credstore/             operator, on the /etc overlay upper
+    /run/credstore/
+    /usr/lib/credstore/         this directory — the image default
+
+So every value here is a DEFAULT that an installer can override per host
+by dropping <name>.cred into loader/credentials/ on the ESP, before the
+machine has ever booted. That is the whole point: the ESP is the only
+writable surface between `myosi install` and first boot.
+
+A default belongs here rather than in /etc whenever its consumer skips
+when the value is "already set" — shipping /etc/hostname or a root line
+in /etc/shadow does not merely provide a default, it makes the
+corresponding credential unreachable forever. Files that are plain
+configuration (sshd_config.d, sudoers.d, ...) stay in /etc: the overlay
+upper wins over them at runtime, so they are overridable already.
+
+Filenames here carry NO .cred suffix. The suffix exists only on the ESP,
+where systemd-stub uses it to select files, and is stripped on import.
