@@ -14,14 +14,11 @@ enable myosi-glib-schemas-compile.service
 # Self-gating on a battery; inert on non-laptops.
 enable myosi-power-tune.service
 
-# No myosi-homed-user@ instance is enabled: homed cannot rename a user later
-# (no `homectl rename` in 259), so a public image must not pick the name. The
-# operator creates one on first boot — see README "Post-installation".
-#
-# To pre-bake one, ship usr/share/myosi/users/<name>.user plus a
-# multi-user.target.wants/myosi-homed-user@<name>.service symlink via
-# mkosi.local.conf ExtraTrees= (preset-all can't enable template instances).
-# Don't also enable @user — both would claim UID 1000 and start in parallel.
+# No interactive user is baked: homed cannot rename a user later (no
+# `homectl rename` in 259), so a public image must not pick the name. The host
+# picks it instead, either from a home.create.<name> / sysusers.extra
+# credential on the ESP before the first boot (credentials/README.md), or from
+# `myosi user-create` afterwards.
 
 # No dotfiles seeding into $HOME: homed activates the encrypted home at PAM
 # login, so a build-time copy would be shadowed by the LUKS mount.

@@ -1,20 +1,34 @@
-Declarative homed user records.
+Declarative homed user records, for a host that is already running.
 
-Drop <name>.user here, then enable the matching unit:
+To declare a user BEFORE the host has ever booted, do not use this directory
+— drop a `home.create.<name>.cred` (homed) or `sysusers.extra.cred` (classic)
+into `loader/credentials/` on the target's ESP instead. That is the only path
+that works on a disk `systemd-repart` has not yet initialised, because this
+directory lives on the /etc overlay, which lives on data-luks, which does not
+exist until first boot. See credentials/README.md in the myosi repo.
 
-    systemctl enable --now myosi-homed-user@<name>.service
+On a running host there are two ways in:
 
-That creates the user (LUKS home, SELinux defcontext, correct storage flags),
-binds it to groups declared by active sysexts, and allocates its
-/etc/subuid + /etc/subgid ranges.
+    myosi user-create <name> homed 1000 wheel,video,render,input,kvm
 
-user-provision searches this directory first, then the baked
+creates the record, the LUKS home with the correct storage flags, the group
+bindings declared by active sysexts, and the /etc/subuid + /etc/subgid ranges.
+That is the normal path.
+
+Or drop <name>.user here and let myosi-users.service pick it up on the next
+boot. user-provision searches this directory first, then the baked
 /usr/share/myosi/users/. This one is writable and survives A/B image updates;
 /usr is read-only erofs, so records cannot be added there.
 
-The file is the "regular" section of a systemd user record. Storage flags
-(--storage, --disk-size, --luks-*) are applied by the helper, not fields here.
-See homectl(1) and https://systemd.io/USER_RECORD/.
+(An earlier myosi-homed-user@<name>.service is gone — its work moved into the
+`myosi user-create` recipe and myosi-users.service.)
+
+The file is the "regular" section of a systemd user record. See homectl(1) and
+https://systemd.io/USER_RECORD/. A record handed to homed as a credential can
+additionally carry the storage flags inline — storage, fileSystemType,
+diskSize, luksDiscard, luksOfflineDiscard, autoResizeMode,
+luksExtraMountOptions — which is how the credential path reproduces what the
+helper applies here.
 
 Example — /etc/myosi/users/alan.user:
 
@@ -38,9 +52,4 @@ Notes:
   - uid 1000 marks the primary user. If that uid is already taken, the helper
     skips creation and binds groups to the existing owner instead.
   - Creation is one-shot, gated on `homectl inspect`. Editing this file later
-    does not update an existing record — use `homectl update`.
-  - A record is optional: `homectl create` by hand works too, and enabling the
-    unit afterwards still binds groups and subids.
-  - Pick the username carefully. systemd 259 has no `homectl rename`.
-
-Only files matching <name>.user are read; this README is ignored.
+    does not re-create or reshape an existing home.

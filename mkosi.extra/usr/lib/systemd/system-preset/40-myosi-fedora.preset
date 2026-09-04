@@ -13,10 +13,15 @@ enable systemd-sysext.service
 enable systemd-bless-boot.service
 
 # homed owns interactive users (declarative records via
-# /etc/credstore/home.create.<name>, consumed on first start only);
+# home.create.<name> credentials, consumed on first boot only);
 # userdbd is the NSS bridge so getent resolves homed users/groups.
 enable systemd-homed.service
 enable systemd-userdbd.service
+# Consumes home.create.<name>: this is what makes a homed user creatable
+# from the ESP before the host has ever booted, replacing the old
+# myosi-homed-user@.service + user-provision pair. See the drop-in for why
+# its interactive wizard has to go.
+enable systemd-homed-firstboot.service
 
 # bootc auto-update conflicts with sysupdate-driven UKI rollover.
 disable bootc-fetch-apply-updates.timer
