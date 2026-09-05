@@ -1,24 +1,32 @@
 Image-default system credentials.
 
-systemd assembles its credential search path as (exec-credential.c,
-credential_search_path), first match winning:
+systemd resolves a unit's ImportCredential=/LoadCredential= against, first
+match winning (exec-credential.c, credential_search_path):
 
-    /run/credentials/@system/   ESP loader/credentials, SMBIOS, qemu
+    /run/credentials/@system/   system credentials (SMBIOS, qemu, initrd)
     /etc/credstore/             operator, on the /etc overlay upper
     /run/credstore/
     /usr/lib/credstore/         this directory — the image default
 
-So every value here is a DEFAULT that an installer can override per host
-by dropping <name>.cred into loader/credentials/ on the ESP, before the
-machine has ever booted. That is the whole point: the ESP is the only
-writable surface between `myosi install` and first boot.
+So a value here is a DEFAULT that a host can override without a rebuild.
+The image is generic; identity is per-host.
 
-A default belongs here rather than in /etc whenever its consumer skips
-when the value is "already set" — shipping /etc/hostname or a root line
-in /etc/shadow does not merely provide a default, it makes the
-corresponding credential unreachable forever. Files that are plain
-configuration (sshd_config.d, sudoers.d, ...) stay in /etc: the overlay
-upper wins over them at runtime, so they are overridable already.
+WHAT IS NOT HERE, AND WHY
+-------------------------
+A default belongs here only when its consumer can actually reach it. On
+systemd 259 most cannot, verified by booting a VM:
 
-Filenames here carry NO .cred suffix. The suffix exists only on the ESP,
-where systemd-stub uses it to select files, and is stripped on import.
+  hostname   no firstboot.hostname or system.hostname credential exists in
+             259 at all (they are newer). /etc/hostname is baked instead
+             and overridden per host by a tmpfiles.extra credential.
+  locale     /etc/locale.conf ships in an RPM, so it is in the image no
+             matter what mkosi.extra does, and firstboot skips a value
+             that is already set. Baked via mkosi.conf Locale=.
+  keymap     same, /etc/vconsole.conf. It also overrides the vconsole.*
+             credentials outright (vconsole-setup reads the file last).
+
+The rule the hard way: deleting a file from mkosi.extra/etc/ does NOT
+remove it from the image. mkosi.finalize snapshots the build-settled /etc,
+RPM-provided files included.
+
+Filenames here carry NO .cred suffix — that exists only on the ESP.

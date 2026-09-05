@@ -1,89 +1,137 @@
 # Credential examples
 
-Every file beside this one is a **template for the ESP**. Copy the ones you
-want onto a target disk's EFI System Partition, adding the `.cred` suffix,
-and the host picks them up on its next boot:
+One generic image installs on every host; everything per-host arrives as a
+**system credential** staged on that host's ESP, before it has ever booted.
+
+## Credentials on the ESP must be encrypted — and even then, not everywhere
+
+A plaintext `.cred` in `loader/credentials/` **breaks the boot**:
+`systemd-tmpfiles-setup*` fails at step `CREDENTIALS`, taking static device
+nodes, `/var/log/journal`, dbus-broker, NetworkManager, logind, homed and
+sshd with it. systemd routes ESP credentials into the `@encrypted` bucket —
+an ESP can be edited offline — so consumers must authenticate them.
+
+Encrypting needs a key that exists before the host does, which rules out
+`tpm2` and `host`. That leaves `--with-key=null`, which systemd accepts only
+in some configurations. All measured on this image:
+
+| Secure Boot | TPM2 | plaintext | `--with-key=null` |
+|---|---|---|---|
+| off | present | **breaks boot** | works |
+| **on** | **present** | — | **silently rejected** |
+| on | absent | — | works |
+
+**ESP credentials therefore do not work on a Secure Boot host with a TPM**,
+which is myosi's target profile. The rejection is graceful — the host boots
+fine and ignores them — but nothing is applied. Until a signed UKI addon
+path exists (see the README chapter), such hosts are configured after their
+first boot, or from a private image.
 
 ```bash
-sudo mount /dev/sdX1 /mnt/esp                  # ESP is partition 1
+sudo systemd-creds encrypt --with-key=null --name=ssh.authorized_keys.root \
+    ~/.ssh/id_ed25519.pub ssh.authorized_keys.root.cred
+```
+
+`--name=` must match the filename minus `.cred`.
+
+## A default in the image blocks the ESP override
+
+Where a name exists in both `/usr/lib/credstore/` and the ESP, **the image
+default wins** — measured. So the two are mutually exclusive per name:
+
+| name | default shipped? | ESP override? |
+|---|---|---|
+| `passwd.hashed-password.root` | yes (`changeme`) | no — change it with `passwd` |
+| `firstboot.timezone` | yes (`UTC`) | no — `timedatectl` |
+| `ssh.authorized_keys.root` | no | **yes** |
+| `tmpfiles.extra` | no | **yes** |
+| `sysusers.extra`, `home.create.<name>` | no | **yes** |
+
+`tmpfiles.extra` cannot write `/etc/shadow` — SELinux denies it — so it is
+not a back door around the first row.
+
+## Staging them
+
+```bash
+sudo mount /dev/sdX1 /mnt/esp                    # ESP is partition 1
 sudo mkdir -p /mnt/esp/loader/credentials
-sudo cp ssh.authorized_keys.root /mnt/esp/loader/credentials/ssh.authorized_keys.root.cred
+sudo cp *.cred /mnt/esp/loader/credentials/
 sudo umount /mnt/esp
 ```
 
-The whole point is that this works on a disk that has **never booted**. The
-ESP is the only writable surface between `myosi install` and first boot —
-`/etc` lives on `data-luks`, which `systemd-repart` does not create until the
-machine is already running.
+Use `loader/credentials/`, not `EFI/Linux/<uki>.efi.extra.d/`: the UKI
+filename carries the image version and rotates on every `myosi update`,
+which would orphan a per-UKI directory.
 
-The files here carry no `.cred` suffix so they read as what they are. The
-suffix exists only on the ESP, where `systemd-stub` uses it to select files,
-and is stripped again on import.
+This works on a disk that has never booted, which is the whole point —
+`/etc` lives on `data-luks`, which `systemd-repart` only creates during the
+first boot. The ESP is the one writable surface before that.
 
-## Precedence
+## What systemd 259 actually supports
 
-`systemd-stub` packs `$ESP/loader/credentials/*.cred` into a cpio the kernel
-unpacks at `/.extra/global_credentials/`; PID 1 imports it into
-`/run/credentials/@system/` before any unit runs. Consumers then search
-(first match wins):
+Verified by booting this image, not read from documentation — the upstream
+docs describe a newer systemd and list credentials 259 does not have.
 
-| | |
+| credential | effect |
 |---|---|
-| `/run/credentials/@system/` | **what you put on the ESP** |
-| `/etc/credstore/` | operator, on the `/etc` overlay upper |
-| `/run/credstore/` | |
-| `/usr/lib/credstore/` | **the image default** |
+| `ssh.authorized_keys.root` | root's authorized keys; `tmpfiles` also copies it to `/etc/ssh/authorized_keys.d/root`, making it permanent |
+| `passwd.hashed-password.root` | root password, first boot only |
+| `passwd.shell.root` | root's shell |
+| `firstboot.timezone` | `/etc/localtime` |
+| `firstboot.locale`, `firstboot.keymap` | only if `/etc/locale.conf` / `/etc/vconsole.conf` are absent — they are **not**, both ship in RPMs |
+| `sysusers.extra` | classic users |
+| `home.create.<name>` | homed users |
+| `tmpfiles.extra` | arbitrary `tmpfiles.d` lines — the general-purpose lever |
+| ~~`firstboot.hostname`~~ | **does not exist in 259** |
+| ~~`system.hostname`~~, ~~`system.machine_id`~~ | **not in 259's PID 1** |
+| ~~`network.network.*`~~ | generates networkd config; myosi is NetworkManager-only |
 
-So an ESP credential always beats the image default, and an operator can
-override either at runtime by writing `/etc/credstore/`.
+## Hostname, and anything else without a credential
 
-## What myosi ships as a default
+`tmpfiles.extra` covers it. `f+` truncates and rewrites, so it beats a file
+already baked into the image:
 
-`mkosi.extra/usr/lib/credstore/` — override any of these from the ESP:
+```
+f+ /etc/hostname 0644 root root - nas-01
+```
 
-| credential | default |
-|---|---|
-| `firstboot.hostname` | `myosi` |
-| `firstboot.locale` | `en_US.UTF-8` |
-| `firstboot.timezone` | `UTC` |
-| `vconsole.keymap` | `us` |
-| `vconsole.font` | `eurlatgr` |
-| `passwd.hashed-password.root` | the `changeme` hash |
+Verified: the guest came up as `nas-01`. The same trick sets any file the
+image bakes — `/etc/locale.conf`, `/etc/vconsole.conf`, a NetworkManager
+keyfile (mode `0600` or NM ignores it).
 
-## When each one is read
+## When each is read
 
 | credential | consumed by | when |
 |---|---|---|
-| `ssh.authorized_keys.root` | `sshd` directly, and `systemd-tmpfiles-setup.service` copies it to `/etc/ssh/authorized_keys.d/root` | every boot; the copy makes it permanent |
-| `ssh.authorized_keys.<user>` | `sshd` directly | every boot, **not** persisted |
-| `firstboot.hostname` / `.locale` / `.timezone` | `systemd-firstboot.service` | first boot only (`ConditionFirstBoot=yes`) |
-| `passwd.hashed-password.root` | `systemd-firstboot.service`, `systemd-sysusers.service` | first boot only |
-| `vconsole.keymap` / `.font` | `systemd-vconsole-setup.service` | every boot |
-| `network.dns` / `network.search_domains` | `systemd-resolved.service` | every boot |
-| `sysusers.extra` | `systemd-sysusers.service` | every boot, idempotent |
-| `home.create.<user>` | `systemd-homed-firstboot.service` | first boot only |
-| `tmpfiles.extra` | `systemd-tmpfiles-setup.service` | every boot |
+| `ssh.authorized_keys.root` | `sshd` directly, and `systemd-tmpfiles-setup.service` | every boot; the copy makes it permanent |
+| `passwd.*`, `firstboot.*` | `systemd-firstboot.service`, `systemd-sysusers.service` | **first boot only** (`ConditionFirstBoot=yes`) |
+| `home.create.<name>` | `systemd-homed-firstboot.service` | first boot only |
+| `tmpfiles.extra` | `systemd-tmpfiles-setup.service` | every boot, idempotent |
 
-"First boot only" is a feature, not a limitation: it is what stops a
-credential from clobbering a later `passwd root` or `hostnamectl`. Those edits
-land on the `/etc` overlay upper and survive image upgrades.
+First-boot-only is a feature: it is what stops a credential from clobbering
+a later `passwd root` or `hostnamectl`. Those edits land on the `/etc`
+overlay upper and survive image upgrades.
 
-## Naming rules
+`systemd-firstboot` only fills in values that are **unset**. That is why
+`/etc/shadow` ships with no root line at all — any line, even a locked
+`!*`, makes `passwd.hashed-password.root` unreachable and pins every host
+to one password.
 
-The filename minus `.cred` becomes the credential name, and must satisfy
-systemd's `credential_name_valid()` — printable ASCII, no `/`, no `:`, not `.`
-or `..`, at most 255 characters. `systemd-stub` additionally skips dotfiles
-and directories. The convention is a dotted namespace, with the target
-appended for per-user settings: `ssh.authorized_keys.root`,
-`passwd.hashed-password.alan`, `home.create.alan`.
+## Naming
 
-## What does NOT work here
+The filename minus `.cred` is the credential name: printable ASCII, no `/`,
+no `:`, not `.` or `..`, at most 255 characters. Per-user settings append
+the user — `ssh.authorized_keys.root`, `passwd.hashed-password.alan`,
+`home.create.alan`. Multiple SSH keys go in one file, one per line.
 
-- **`network.network.*`, `network.link.*`, `network.netdev.*`** — these
-  generate `systemd-networkd` configuration, and myosi is NetworkManager-only
-  (`networkd` is not installed). Use `tmpfiles.extra` to drop a NetworkManager
-  keyfile instead; see `tmpfiles.extra`.
-- **Secrets.** The ESP is unencrypted vfat and anyone with the disk can read
-  it. Public keys and password *hashes* are fine. Anything genuinely secret
-  belongs in `/etc/credstore.encrypted/` with TPM binding, which by definition
-  cannot be pre-staged before first boot.
+## Verifying on the host
+
+```bash
+systemd-creds list
+systemctl --failed
+ls /run/credentials/
+```
+
+`systemd-tpm2-setup.service` failing on first boot is expected and
+allowlisted in `scripts/vm-test-assertions.sh`. Anything else in
+`systemctl --failed` is not.
