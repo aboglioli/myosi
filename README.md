@@ -1031,7 +1031,7 @@ and presets cover the rest:
 | Unit | State | Enable when |
 |---|---|---|
 | `myosi-users.service` | enabled by `myosi user-create` | You want sysext group bindings kept in sync (above) |
-| `systemd-homed-firstboot.service` | disabled | You'd rather be prompted for a user on first boot, or drive it with a `home.create.<name>` credential. Blocks unattended installs if it prompts |
+| `systemd-homed-firstboot.service` | disabled | You want its interactive first-boot user wizard. It blocks an unattended install, and its `home.create.<name>` credential does not work on systemd 259 |
 | `bootc-fetch-apply-updates.timer` | disabled **on purpose** | Never — it conflicts with sysupdate-driven UKI rollover |
 
 Sysexts are **not** managed with `systemctl` — use `myosi extension-enable
@@ -1158,11 +1158,11 @@ line at deactivation on a record that already reports
    the ESP's values if the installer staged any and the
    `/usr/lib/credstore/` defaults otherwise. `systemd-vconsole-setup.service`
    does the same for keymap and font, on this and every later boot.
-3. `systemd-homed.service` starts, then `systemd-homed-firstboot.service`
-   materialises any `home.create.<name>` credential. A classic user declared
-   through `sysusers.extra` was already created in step 2. **With no
-   credential, no interactive user is provisioned** — the image bakes none,
-   because homed cannot rename a user later.
+3. `systemd-homed.service` starts, then `myosi-users.service` provisions
+   every identity record under `/etc/myosi/users/` or
+   `/usr/share/myosi/users/` — account, groups, subuid range, linger.
+   **A stock image declares none**, so nothing is created: homed cannot
+   rename a user later, so a generic image must not pick the name.
 4. If nothing was staged, the operator logs in at the console as `root` /
    `changeme` and runs `myosi user-create <you> ...`, then `passwd -l root`.
    See [Post-installation](#post-installation).
@@ -1985,7 +1985,7 @@ reads.
 | `ssh.authorized_keys.root` | root's keys. `sshd` reads it directly, and `tmpfiles.d/myosi.conf` copies it to `/etc/ssh/authorized_keys.d/root`, so one delivery is permanent |
 | `passwd.hashed-password.root`, `passwd.shell.root` | root password and shell, first boot only |
 | `firstboot.timezone` | `/etc/localtime` |
-| ~~`sysusers.extra`~~, ~~`home.create.<name>`~~ | **do not use** — see below |
+| ~~`sysusers.extra`~~, ~~`home.create.<name>`~~ | **not used** — users come from `myosi user-create`, see below |
 | `tmpfiles.extra` | arbitrary `tmpfiles.d` lines — the general-purpose lever |
 | `network.dns`, `network.search_domains` | resolver, via `systemd-resolved` |
 | **`firstboot.hostname`** | **does not exist in 259** |
@@ -1993,39 +1993,31 @@ reads.
 | `firstboot.locale`, `firstboot.keymap` | inert — `/etc/locale.conf` and `/etc/vconsole.conf` ship in RPMs, and firstboot only fills in values that are unset |
 | `network.network.*`, `link.*`, `netdev.*` | inert — generates networkd config, and myosi is NetworkManager-only |
 
-### Users: declare a record, do not create the account
+### Users are not provisioned by credentials
 
-`home.create.<name>` and `sysusers.extra` were both tried and removed.
-Measured on this image:
+Create them with `myosi user-create` once the host is reachable — the SSH key
+the credential set already delivers is what gets you there. That recipe owns
+the storage flags a LUKS home needs (`luks-offline-discard=no`,
+`auto-resize-mode=grow`, without which the home shrinks on every logout), the
+SELinux `defcontext`, a disk size computed from free space, the subuid/subgid
+range rootless podman needs, sysext group bindings and linger.
 
-- `home.create.<name>` cannot work on systemd 259. With a `secret` section
-  homed rejects the entire record (`Failed to execute operation: Invalid
-  argument`); without one, `homectl` blocks on an interactive password
-  prompt a credential cannot answer.
-- Both bypass `/usr/libexec/myosi/user-provision`, so the account gets **no
-  subuid/subgid range** — rootless podman broken — plus no sysext group
-  bindings and no linger. `user-sweep` never adopts it either: it only scans
-  `/etc/myosi/users/` and `/usr/share/myosi/users/`.
+Two credential routes were tried and removed, both measured on this image:
 
-Write the identity record through `tmpfiles.extra` instead, and let
-`myosi-users.service` create the account on the same boot:
+- **`home.create.<name>`** cannot work on systemd 259. With a `secret` section
+  homed rejects the whole record (`Failed to execute operation: Invalid
+  argument`); without one, `homectl` blocks on an interactive password prompt
+  a credential cannot answer. `systemd-homed-firstboot.service` is disabled in
+  the preset for that reason.
+- **`sysusers.extra`** creates an account that bypasses `user-provision`: no
+  subuid range, no sysext groups, no linger. It is also create-only, so every
+  later edit to the record is silently ignored.
 
-```
-f+ /etc/myosi/users/alan.user 0644 root root - {"userName":"alan","uid":1000,...}
-```
-
-Creation then goes through `user-provision`, the path that already gets the
-storage flags right. Verified on a booted host:
-
-```
-LUKS Discard: online=yes offline=no      Auto Resize: grow
-File System: btrfs                       Disk Size: 14.3G (computed, not fixed)
-groups: wheel video render input kvm libvirt incus-admin
-/etc/subuid:alan:100000:1000000
-```
-
-and `PASSWORD=changeme homectl authenticate alan` succeeds. Drop
-`"service":"io.systemd.Home"` for a classic user.
+`myosi-users.service` is enabled in the preset regardless. It is the upkeep
+sweep — group memberships that only appear when a sysext is merged, subuid
+ranges — and it is what makes a record baked into a private image at
+`/usr/share/myosi/users/<name>.user` actually get provisioned. It self-gates,
+logging *"no identities declared, nothing to do"* when there is nothing to do.
 
 ### Hostname, and anything else with no credential
 
@@ -2091,8 +2083,8 @@ mutually exclusive for the same credential name. Pick per name:
   after first boot with `passwd` / `timedatectl set-timezone` — those write
   the `/etc` overlay upper, and `ConditionFirstBoot=yes` means the default
   never comes back to clobber them.
-- `ssh.authorized_keys.root`, `tmpfiles.extra`, `sysusers.extra` and
-  `home.create.<name>` ship **no** default, so the ESP owns them.
+- `ssh.authorized_keys.root`, `tmpfiles.extra` and `network.dns` ship **no**
+  default, so the ESP owns them.
 
 `tmpfiles.extra` cannot write `/etc/shadow` — SELinux denies it
 (`Failed to open/create file /etc/shadow: Permission denied`), so it is

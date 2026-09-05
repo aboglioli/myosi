@@ -45,7 +45,7 @@ default wins** — measured. So the two are mutually exclusive per name:
 | `firstboot.timezone` | yes (`UTC`) | no — `timedatectl` |
 | `ssh.authorized_keys.root` | no | **yes** |
 | `tmpfiles.extra` | no | **yes** |
-| `sysusers.extra`, `home.create.<name>` | no | **yes** |
+| `network.dns` | no | **yes** |
 
 `tmpfiles.extra` cannot write `/etc/shadow` — SELinux denies it — so it is
 not a back door around the first row.
@@ -85,42 +85,31 @@ docs describe a newer systemd and list credentials 259 does not have.
 | ~~`system.hostname`~~, ~~`system.machine_id`~~ | **not in 259's PID 1** |
 | ~~`network.network.*`~~ | generates networkd config; myosi is NetworkManager-only |
 
-## Users: declare a record, do not create the account
+## Users are not provisioned by credentials
 
-**Do not use `home.create.<name>` or `sysusers.extra`.** Both were tried and
-removed. Measured on this image:
+Create them with `myosi user-create` once the host is up — the SSH key this
+credential set already delivers is what gets you there:
 
-- `home.create.<name>` is unusable on systemd 259 at all. With a `secret`
-  section homed rejects the whole record — `Failed to execute operation:
-  Invalid argument` — and without one `homectl` blocks on an interactive
-  password prompt that a credential cannot answer.
-- Both bypass `/usr/libexec/myosi/user-provision`, so the account gets **no
-  subuid/subgid range** (rootless podman broken), no sysext group bindings
-  and no linger. `user-sweep` never adopts it either, because it only scans
-  `/etc/myosi/users/` and `/usr/share/myosi/users/`.
-
-Write the **identity record** instead and let `myosi-users.service` create
-the account on the same boot:
-
-```
-f+ /etc/myosi/users/alan.user 0644 root root - {"userName":"alan","uid":1000,...}
+```bash
+ssh root@<host>
+myosi user-create alan homed 1000 wheel,video,render,input,kvm    # workstation
+myosi user-create alan classic 1000 wheel                          # headless
 ```
 
-That routes creation through `user-provision`, which is the path that
-already gets the storage flags right. Verified on a booted host:
+The recipe owns the storage flags a LUKS home needs — `luks-offline-discard=no`
+and `auto-resize-mode=grow`, without which the home shrinks on every logout —
+plus the SELinux `defcontext`, a disk size computed from free space, the
+subuid/subgid range rootless podman needs, sysext group bindings and linger.
 
-```
-LUKS Discard: online=yes offline=no      Auto Resize: grow
-File System: btrfs                       Disk Size: 14.3G (computed)
-groups: wheel video render input kvm libvirt incus-admin
-/etc/subuid:alan:100000:1000000
-```
+Two credential routes were tried and removed:
 
-and `PASSWORD=changeme homectl authenticate alan` succeeds.
-
-Drop `"service":"io.systemd.Home"` from the record for a classic user — the
-right choice on a headless host, where an encrypted home never unlocks and
-linger plus rootless quadlets are what you want.
+- **`home.create.<name>`** cannot work on systemd 259 at all. With a `secret`
+  section homed rejects the whole record (`Failed to execute operation:
+  Invalid argument`); without one, `homectl` blocks on an interactive
+  password prompt a credential cannot answer.
+- **`sysusers.extra`** creates an account that bypasses `user-provision`
+  entirely: no subuid range, no sysext groups, no linger. `sysusers` is also
+  create-only, so it silently ignores every later change to the record.
 
 ## Hostname, and anything else without a credential
 
@@ -141,7 +130,6 @@ keyfile (mode `0600` or NM ignores it).
 |---|---|---|
 | `ssh.authorized_keys.root` | `sshd` directly, and `systemd-tmpfiles-setup.service` | every boot; the copy makes it permanent |
 | `passwd.*`, `firstboot.*` | `systemd-firstboot.service`, `systemd-sysusers.service` | **first boot only** (`ConditionFirstBoot=yes`) |
-| `home.create.<name>` | `systemd-homed-firstboot.service` | first boot only |
 | `tmpfiles.extra` | `systemd-tmpfiles-setup.service` | every boot, idempotent |
 
 First-boot-only is a feature: it is what stops a credential from clobbering
@@ -158,7 +146,7 @@ to one password.
 The filename minus `.cred` is the credential name: printable ASCII, no `/`,
 no `:`, not `.` or `..`, at most 255 characters. Per-user settings append
 the user — `ssh.authorized_keys.root`, `passwd.hashed-password.alan`,
-`home.create.alan`. Multiple SSH keys go in one file, one per line.
+`passwd.shell.root`. Multiple SSH keys go in one file, one per line.
 
 ## Verifying on the host
 

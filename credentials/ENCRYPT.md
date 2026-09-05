@@ -5,7 +5,7 @@ of them can go on an ESP as-is — see README.md, a plaintext .cred breaks the
 boot. Encrypt each one you want first:
 
     for f in ssh.authorized_keys.root passwd.hashed-password.root \
-             tmpfiles.extra network.dns sysusers.extra home.create.alan; do
+             tmpfiles.extra network.dns; do
         [ -f "$f" ] || continue
         sudo systemd-creds encrypt --with-key=null --name="$f" "$f" "$f.cred"
     done

@@ -1,13 +1,12 @@
 Declarative homed user records, for a host that is already running.
 
-To declare a user BEFORE the host has ever booted, do not use this directory
-— drop a `home.create.<name>.cred` (homed) or `sysusers.extra.cred` (classic)
-into `loader/credentials/` on the target's ESP instead. That is the only path
-that works on a disk `systemd-repart` has not yet initialised, because this
-directory lives on the /etc overlay, which lives on data-luks, which does not
-exist until first boot. See credentials/README.md in the myosi repo.
+A user cannot be created before the host's first boot: this directory lives
+on the /etc overlay, which lives on data-luks, which systemd-repart only
+creates during that boot. Credentials do not help either — see
+credentials/README.md for why home.create.<name> and sysusers.extra were both
+tried and rejected. Stage an SSH key instead and create the user over it.
 
-On a running host there are two ways in:
+There are two ways in:
 
     myosi user-create <name> homed 1000 wheel,video,render,input,kvm
 

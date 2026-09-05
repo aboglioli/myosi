@@ -5,11 +5,10 @@
 # boots. So there is nothing to bake into the image — unlike mybox, which is a
 # container and can take its user from env vars at start.
 #
-# It can however be DECLARED before first boot, on the one surface that is
-# writable by then: a home.create.<name> or sysusers.extra credential on the
-# ESP, materialised during the first boot by systemd-homed-firstboot /
-# systemd-sysusers. See credentials/README.md. These recipes remain the path
-# for a host that is already running.
+# Nor from a credential: home.create.<name> and sysusers.extra were both
+# tried and rejected — see credentials/README.md. These recipes are the only
+# way a user is created; a staged SSH key is what makes them reachable on a
+# headless host.
 #
 # The split: these recipes are the operator action, myosi-users.service is
 # the upkeep. Creation is one-shot; group membership, subuid ranges and

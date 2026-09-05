@@ -12,8 +12,8 @@ enable systemd-resolved.service
 enable systemd-sysext.service
 enable systemd-bless-boot.service
 
-# homed owns interactive users (declarative records via
-# home.create.<name> credentials, consumed on first boot only);
+# homed owns interactive users (declarative records under
+# /etc/myosi/users/, applied by myosi-users.service);
 # userdbd is the NSS bridge so getent resolves homed users/groups.
 enable systemd-homed.service
 enable systemd-userdbd.service
