@@ -1,10 +1,14 @@
 # User management.
 #
-# Creating a user is a one-time act that cannot happen before first boot:
-# /home lives on the data-luks pool, and systemd-repart only creates that
-# pool the first time the image boots. So there is nothing to bake into the
-# image and no point provisioning at build time — unlike mybox, which is a
+# Creating a user cannot happen at BUILD time: /home lives on the data-luks
+# pool, and systemd-repart only creates that pool the first time the image
+# boots. So there is nothing to bake into the image — unlike mybox, which is a
 # container and can take its user from env vars at start.
+#
+# Nor from a credential: home.create.<name> and sysusers.extra were both
+# tried and rejected — see credentials/README.md. These recipes are the only
+# way a user is created; a staged SSH key is what makes them reachable on a
+# headless host.
 #
 # The split: these recipes are the operator action, myosi-users.service is
 # the upkeep. Creation is one-shot; group membership, subuid ranges and
@@ -68,7 +72,6 @@ user-create name storage="classic" uid="" groups="" shell="" realname="":
     echo "wrote $dest:"
     sed 's/^/    /' "$dest"
 
-    systemctl enable myosi-users.service >/dev/null 2>&1 || true
     echo "provisioning..."
     /usr/libexec/myosi/user-provision --storage='{{storage}}' "$name"
     echo

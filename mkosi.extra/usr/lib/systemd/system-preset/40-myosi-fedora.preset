@@ -12,11 +12,17 @@ enable systemd-resolved.service
 enable systemd-sysext.service
 enable systemd-bless-boot.service
 
-# homed owns interactive users (declarative records via
-# /etc/credstore/home.create.<name>, consumed on first start only);
+# homed owns interactive users (declarative records under
+# /etc/myosi/users/, applied by myosi-users.service);
 # userdbd is the NSS bridge so getent resolves homed users/groups.
 enable systemd-homed.service
 enable systemd-userdbd.service
+# NOT enabled: home.create.<name> is unusable on systemd 259 (a record with
+# a `secret` section is rejected outright, without one homectl blocks on a
+# password prompt), and it would bypass user-provision anyway — no subuid,
+# no sysext groups, no linger. Users are declared as an identity record and
+# created by myosi-users.service instead. See credentials/README.md.
+disable systemd-homed-firstboot.service
 
 # bootc auto-update conflicts with sysupdate-driven UKI rollover.
 disable bootc-fetch-apply-updates.timer

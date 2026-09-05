@@ -1,0 +1,46 @@
+Image-default system credentials.
+
+systemd resolves a unit's ImportCredential=/LoadCredential= against, first
+match winning (exec-credential.c, credential_search_path):
+
+    /run/credentials/@system/   system credentials (SMBIOS, qemu, initrd)
+    /etc/credstore/             operator, on the /etc overlay upper
+    /run/credstore/
+    /usr/lib/credstore/         this directory — the image default
+
+So a value here is a DEFAULT. Note it beats an ESP credential of the same
+name — measured — so a name defaulted here is NOT overridable before first
+boot. That is the right trade only for values every host can start with and
+change later at runtime:
+
+  passwd.hashed-password.root   `changeme`, so an unstaged host still has a
+                                console login. Change it with `passwd`.
+  firstboot.timezone            written to /etc/localtime on first boot.
+                                Change it with `timedatectl set-timezone`.
+
+Both land on the /etc overlay upper and survive image upgrades, and
+systemd-firstboot never runs again (ConditionFirstBoot=yes), so neither
+default can come back and clobber the host's choice.
+
+Anything that must differ per host BEFORE first boot must have no default
+here — see credentials/ in the repo.
+
+WHAT IS NOT HERE, AND WHY
+-------------------------
+A default belongs here only when its consumer can actually reach it. On
+systemd 259 most cannot, verified by booting a VM:
+
+  hostname   no firstboot.hostname or system.hostname credential exists in
+             259 at all (they are newer). /etc/hostname is baked instead
+             and overridden per host by a tmpfiles.extra credential.
+  locale     /etc/locale.conf ships in an RPM, so it is in the image no
+             matter what mkosi.extra does, and firstboot skips a value
+             that is already set. Baked via mkosi.conf Locale=.
+  keymap     same, /etc/vconsole.conf. It also overrides the vconsole.*
+             credentials outright (vconsole-setup reads the file last).
+
+The rule the hard way: deleting a file from mkosi.extra/etc/ does NOT
+remove it from the image. mkosi.finalize snapshots the build-settled /etc,
+RPM-provided files included.
+
+Filenames here carry NO .cred suffix — that exists only on the ESP.
