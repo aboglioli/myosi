@@ -2040,9 +2040,12 @@ ships no default for them; `passwd.hashed-password.root` and
 So shipping an image default and allowing a per-host override are
 mutually exclusive for the same credential name. Pick per name:
 
-- `passwd.hashed-password.root` and `firstboot.timezone` keep their
-  defaults, so an unstaged host still has a console login and a sane
-  clock. Override them after first boot with `passwd` / `timedatectl`.
+- `passwd.hashed-password.root` (`changeme`) and `firstboot.timezone`
+  (`America/Argentina/Mendoza`) keep their defaults, so an unstaged host
+  still has a console login and the right clock. Both are changed for good
+  after first boot with `passwd` / `timedatectl set-timezone` — those write
+  the `/etc` overlay upper, and `ConditionFirstBoot=yes` means the default
+  never comes back to clobber them.
 - `ssh.authorized_keys.root`, `tmpfiles.extra`, `sysusers.extra` and
   `home.create.<name>` ship **no** default, so the ESP owns them.
 
