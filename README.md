@@ -163,7 +163,7 @@ files referenced; this is the operator/contributor map.
 | `/srv`, `/mnt` → `var/mnt` | `/srv` is a dedicated btrfs subvolume from `data-luks`; `/mnt` is symlinked into writable `/var`. | `/srv` and `/mnt` targets are operator-mutable. |
 | `/mnt/backups` → `/var/mnt/backups` | Dedicated btrfs subvolume from `data-luks`, mounted **only on demand** by `var-mnt-backups.mount`. Absent from the mount table until an operator starts it. | Operator-mutable, unmounted by default. |
 | `/var/lib/machines/` | Per-machine btrfs subvolumes for `systemd-nspawn` containers managed by `machinectl`. | Operator-mutable. |
-| `/usr/libexec/myosi/` | Shipped helper scripts (`sysext-modules-refresh`, `user-provision`, `sysext-select`, `install`, `lib.sh`). | Image-coupled. |
+| `/usr/libexec/myosi/` | Shipped helper scripts (`sysext-modules-refresh`, `sysext-select`, `sysext-wants`, `user-provision`, `user-sweep`, `power-tune`, `install`, `lib.sh`). | Image-coupled. |
 
 ### On-demand mounts: the `backups` subvolume
 
@@ -1150,22 +1150,25 @@ line at deactivation on a record that already reports
 
 **First-boot flow:**
 
-1. `myosi-sshd-hostkeys.service` generates rsa+ecdsa+ed25519 host keys
-   sequentially in `/etc/ssh/` (preserved from the overlay era as
-   belt-and-suspenders; the /etc subvol is a plain filesystem so the
-   parallel `sshd-keygen@*` race no longer applies, but the
-   sequential generator costs nothing and keeps logs readable).
-2. `systemd-homed.service` starts. **No user is provisioned** —
-   `myosi-users.service` ships disabled and no record is baked, so nothing
-   calls `homectl create`. (On images that pre-bake an identity via a private
-   overlay, the enabled `@<name>` instance runs `user-provision
-   <name>` here, seeding the LUKS keyslot from the `MYOSI_BOOTSTRAP_PASSWORD`
-   env default via `PASSWORD`/`NEWPASSWORD`.)
-3. Operator logs in at the console as `root` / `changeme`, runs
-   `homectl create <you> --uid=1000 ...` to create the real user, then
-   `passwd -l root`. See [Post-installation](#post-installation).
-4. (Optional) Operator runs `sudo loginctl enable-linger <you>`
-   if they want rootless quadlets to keep running across reboots.
+1. Fedora's `sshd-keygen@.service` instances generate the host keys into
+   `/etc/ssh/`. `myosi-sysext-relabel.service` orders itself
+   `Before=sshd-keygen.target` so they land with the right SELinux labels.
+2. `systemd-firstboot.service` and `systemd-sysusers.service` apply the
+   identity credentials — hostname, locale, timezone, root password — taking
+   the ESP's values if the installer staged any and the
+   `/usr/lib/credstore/` defaults otherwise. `systemd-vconsole-setup.service`
+   does the same for keymap and font, on this and every later boot.
+3. `systemd-homed.service` starts, then `systemd-homed-firstboot.service`
+   materialises any `home.create.<name>` credential. A classic user declared
+   through `sysusers.extra` was already created in step 2. **With no
+   credential, no interactive user is provisioned** — the image bakes none,
+   because homed cannot rename a user later.
+4. If nothing was staged, the operator logs in at the console as `root` /
+   `changeme` and runs `myosi user-create <you> ...`, then `passwd -l root`.
+   See [Post-installation](#post-installation).
+5. (Optional) Operator runs `sudo loginctl enable-linger <you>`
+   if they want rootless quadlets to keep running across reboots — or
+   declares it up front with a `tmpfiles.extra` credential.
    Linger is NOT enabled by default, and on a LUKS-backed homed user it
    cannot give you an unlocked home at boot. **systemd-homed has no TPM2
    support** (no `--tpm2-device`; it offers password, PKCS#11, FIDO2 and
@@ -1181,7 +1184,7 @@ line at deactivation on a record that already reports
 
 | Path | State on fresh install | Notes |
 |------|------------------------|-------|
-| `/etc/shadow` `root` | bootstrap password `changeme` | **Console only** — sshd offers no password method. Destroy it with `passwd -l root` once your user works |
+| `/etc/shadow` `root` | locked in the image; `systemd-firstboot` sets the bootstrap password `changeme` from `/usr/lib/credstore/passwd.hashed-password.root`, or whatever the ESP staged instead | **Console only** — sshd offers no password method. Destroy it with `passwd -l root` once your user works |
 | `/etc/ssh/sshd_config.d/50-myosi.conf` | `PermitRootLogin prohibit-password`, `PasswordAuthentication no`, `AuthenticationMethods publickey` | Root SSH via publickey only. The bootstrap password is **not** remotely usable |
 | baked authorized_keys | none in the public image | Root SSH won't work until a key is shipped (overlay, `/etc` drop-in, or credential) |
 | interactive user | **none** | You create it on first boot — see [Post-installation](#post-installation) |
@@ -1870,6 +1873,211 @@ sudo myosi status
 # Signature validation failures
 sudo dmesg | grep -iE 'verity|enokey' || true
 ```
+
+---
+
+## Configuring a host before its first boot (ESP credentials)
+
+One generic image installs on every host. Everything per-host — SSH keys,
+hostname, root password, users — arrives as a **system credential** staged
+on that host's ESP, before the machine has ever booted.
+
+That is the only surface available at that point: `~/.ssh/authorized_keys`
+and `/etc/ssh/authorized_keys.d/` both live on `data-luks`, which
+`systemd-repart` does not create until the first boot is already underway.
+The ESP is vfat, writable from any laptop, and readable by the boot loader.
+
+Everything below was verified by booting the image in a VM. The upstream
+documentation describes a **newer systemd** than the 259 this image ships,
+and several credentials it lists do not exist here.
+
+### Credentials on the ESP must be encrypted — and even then, not everywhere
+
+A plaintext `.cred` in `loader/credentials/` does not merely fail to
+apply — it **breaks the boot**. `systemd-tmpfiles-setup*` fails at step
+`CREDENTIALS` with `Broken pipe`, and static device nodes,
+`/var/log/journal`, dbus-broker, NetworkManager, logind, homed and sshd
+fall over behind it. A/B tested on one image: with plaintext files, that
+cascade; without them, a clean boot.
+
+systemd routes `$ESP/loader/credentials/*.cred` into the **`@encrypted`**
+bucket — an ESP can be edited offline by anyone holding the disk, so
+consumers must authenticate what they find there, and a plaintext file
+cannot.
+
+Encrypting them needs a key that exists *before the host does*, which
+rules out `tpm2` (seals to a TPM that isn't installed yet) and `host`
+(needs `/var/lib/systemd/credential.secret`). That leaves `--with-key=null`,
+and systemd deliberately restricts when it will accept one:
+
+| Secure Boot | TPM2 | plaintext | `--with-key=null` |
+|---|---|---|---|
+| off | present | **breaks boot** | works |
+| **on** | **present** | — | **silently rejected** |
+| on | absent | — | works |
+
+All measured on this image, not inferred. The rejection is graceful — the
+host boots cleanly and simply ignores the credential:
+
+```
+Credential uses null key intended for use when TPM2 is absent, but TPM2 is
+present! Accepting anyway, since SecureBoot is disabled.
+```
+
+**So ESP credentials do not work on a Secure Boot host that has a TPM**,
+which is myosi's own target profile. They do work on a TPM-less host with
+Secure Boot on, and on anything with Secure Boot off.
+
+**For an SB+TPM host, bake the key into a private image instead.**
+`mkosi.local.conf` with `ExtraTrees=` overlaying your public key onto
+`/usr/share/myosi/ssh/authorized_keys.d/root` puts it in the
+verity-protected, signature-covered `/usr`, which is strictly stronger than
+anything the ESP can offer — no new trust path, and the boot signing key
+never leaves the build host. The cost is that such an image is not the
+public generic one, so it needs its own release channel for `sysupdate`.
+
+Everything else on that host still comes from the ESP after its first boot,
+through `/etc/credstore/`, which is on the writable `/etc` overlay and is a
+trusted source.
+
+```bash
+sudo systemd-creds encrypt --with-key=null --name=ssh.authorized_keys.root \
+    ~/.ssh/id_ed25519.pub ssh.authorized_keys.root.cred
+```
+
+`--name=` must match the filename minus `.cred`, or the credential is
+imported under the wrong name and silently ignored.
+
+Be clear-eyed about what that buys: the null key is a constant compiled
+into systemd, so anyone can decrypt or forge one. It provides no
+confidentiality and no authenticity — it satisfies the format requirement
+and nothing else, which is exactly why systemd refuses it on a host with
+Secure Boot and a TPM. Public keys and password hashes belong on an ESP;
+real secrets never do. For those, use `/etc/credstore.encrypted/` with
+`--with-key=tpm2` once the host exists.
+
+### How the credential arrives
+
+`systemd-stub`, the EFI entry point inside the UKI, scans the ESP it was
+loaded from and packs what it finds into a cpio the kernel unpacks over the
+initrd:
+
+| ESP directory | unpacks to | scope |
+|---|---|---|
+| `loader/credentials/*.cred` | `/.extra/global_credentials/` | whole boot partition |
+| `EFI/Linux/<uki>.efi.extra.d/*.cred` | `/.extra/credentials/` | that one UKI |
+
+PID 1 imports both **in the initrd only**, before any unit runs, and `/run`
+survives `switch_root` so the real system inherits them. Use the global
+directory: `Output=%i_%v_%a` renames the UKI every release, so a per-UKI
+directory is orphaned by the first `myosi update`.
+
+Note this is a different search path from the one units use for
+`ImportCredential=`, which also covers `/etc/credstore/` and
+`/usr/lib/credstore/`. Only real system credentials land in
+`/run/credentials/@system/`, which is what `sshd`'s `AuthorizedKeysFile`
+reads.
+
+### What systemd 259 supports
+
+| credential | effect |
+|---|---|
+| `ssh.authorized_keys.root` | root's keys. `sshd` reads it directly, and `tmpfiles.d/myosi.conf` copies it to `/etc/ssh/authorized_keys.d/root`, so one delivery is permanent |
+| `passwd.hashed-password.root`, `passwd.shell.root` | root password and shell, first boot only |
+| `firstboot.timezone` | `/etc/localtime` |
+| `sysusers.extra` | classic users |
+| `home.create.<name>` | homed users, full JSON record |
+| `tmpfiles.extra` | arbitrary `tmpfiles.d` lines — the general-purpose lever |
+| `network.dns`, `network.search_domains` | resolver, via `systemd-resolved` |
+| **`firstboot.hostname`** | **does not exist in 259** |
+| **`system.hostname`**, `system.machine_id` | **not in 259's PID 1** |
+| `firstboot.locale`, `firstboot.keymap` | inert — `/etc/locale.conf` and `/etc/vconsole.conf` ship in RPMs, and firstboot only fills in values that are unset |
+| `network.network.*`, `link.*`, `netdev.*` | inert — generates networkd config, and myosi is NetworkManager-only |
+
+### Hostname, and anything else with no credential
+
+`tmpfiles.extra` covers it. `f+` truncates and rewrites, so it overrides a
+file the image bakes:
+
+```
+f+ /etc/hostname 0644 root root - nas-01
+```
+
+Verified: the guest came up as `nas-01`. The same works for
+`/etc/locale.conf`, `/etc/vconsole.conf`, or a NetworkManager keyfile
+(mode `0600`, or NM ignores it).
+
+### Why `/etc/shadow` ships with no root line
+
+`systemd-firstboot` only fills in values that are **unset**. Any root line
+at all — even a locked `!*` — makes `passwd.hashed-password.root`
+unreachable and pins every host to one baked password, which defeats a
+generic image. So the factory `/etc/shadow` carries only comments, and the
+password comes from the credential: `/usr/lib/credstore/` provides the
+`changeme` default, the ESP overrides it per host.
+
+The same rule explains the rest of the table above, and it has a corollary
+worth remembering: **deleting a file from `mkosi.extra/etc/` does not remove
+it from the image.** `mkosi.finalize` snapshots the build-settled `/etc`,
+RPM-provided files included. `/etc/hostname` was the only one this trick
+worked for, and that is the one with no credential to replace it.
+
+### Staging them on a disk
+
+```bash
+sudo just install /dev/nvme0n1
+
+sudo mkdir -p /mnt/esp
+sudo mount /dev/nvme0n1p1 /mnt/esp        # ESP is partition 1, 2 GiB vfat
+sudo mkdir -p /mnt/esp/loader/credentials
+sudo cp *.cred /mnt/esp/loader/credentials/
+sudo umount /mnt/esp
+```
+
+Ready-made examples, and the loop that encrypts them, are in
+`credentials/` in this repo.
+
+The same drop works on the **installer USB** — the USB is the image, so you
+can SSH into the live installer and run `myosi install /dev/nvme0n1` from
+your laptop, which removes the last reason to attach a console.
+
+### A credstore default makes a name un-overridable
+
+Measured: where a name exists in **both** `/usr/lib/credstore/` and the
+ESP, the credstore value won. `ssh.authorized_keys.root` and
+`tmpfiles.extra` took effect from the ESP precisely because the image
+ships no default for them; `passwd.hashed-password.root` and
+`firstboot.timezone` did not, because it does.
+
+So shipping an image default and allowing a per-host override are
+mutually exclusive for the same credential name. Pick per name:
+
+- `passwd.hashed-password.root` (`changeme`) and `firstboot.timezone`
+  (`America/Argentina/Mendoza`) keep their defaults, so an unstaged host
+  still has a console login and the right clock. Both are changed for good
+  after first boot with `passwd` / `timedatectl set-timezone` — those write
+  the `/etc` overlay upper, and `ConditionFirstBoot=yes` means the default
+  never comes back to clobber them.
+- `ssh.authorized_keys.root`, `tmpfiles.extra`, `sysusers.extra` and
+  `home.create.<name>` ship **no** default, so the ESP owns them.
+
+`tmpfiles.extra` cannot write `/etc/shadow` — SELinux denies it
+(`Failed to open/create file /etc/shadow: Permission denied`), so it is
+not a way around the above.
+
+### Verifying
+
+```bash
+systemd-creds list
+systemctl --failed
+hostnamectl hostname
+cat /etc/ssh/authorized_keys.d/root
+```
+
+`systemd-tpm2-setup.service` failing on first boot is expected and is
+allowlisted in `scripts/vm-test-assertions.sh`. Anything else in
+`systemctl --failed` means a credential did not authenticate — check that
+every `.cred` was encrypted.
 
 ---
 
@@ -2663,14 +2871,14 @@ overrides the calculation.
 
 Hashes are baked into `mkosi.extra/etc/shadow` (sha-512 + fixed salt for reproducible builds). `systemd-sysusers` preserves shipped shadow entries on first boot, so the hash survives user creation.
 
-`sysusers.d` has **no password column** in its format (6 fields: `TYPE NAME ID GECOS HOME SHELL`), so the only declarative path for shipping a default password is `/etc/shadow` itself. A 7th column triggers `Trailing garbage.` from `systemd-sysusers` and the entry is dropped — verified the hard way during the password-bootstrap refactor.
+`sysusers.d` has **no password column** in its format (6 fields: `TYPE NAME ID GECOS HOME SHELL`) — a 7th column triggers `Trailing garbage.` from `systemd-sysusers` and the entry is dropped, verified the hard way during the password-bootstrap refactor. The declarative path for a default root password is therefore the `passwd.hashed-password.root` credential, defaulted in `/usr/lib/credstore/` and overridable from the ESP; `/etc/shadow` ships root **locked** so that credential stays reachable.
 
 **Bootstrap flow on a fresh install:**
 1. Log in at the **console** as `root` / `changeme`. (Not over SSH — sshd is publickey-only.)
-2. `homectl create <you> --uid=1000 ...` — create the real, properly-named user. See [Post-installation](#post-installation) for the full command and why the name can't be changed later.
+2. `myosi user-create <you> homed 1000 wheel,video,render,input,kvm` — create the real, properly-named user. See [Post-installation](#post-installation) for the parameters and why the name can't be changed later.
 3. Verify `<you>` can log in on another TTY, then `passwd -l root` to destroy the bootstrap credential.
 
-The image ships exactly one known credential, it is unusable remotely, and step 3 removes it. Override the baked hash for real fleets via `mkosi.local.conf` `ExtraTrees=`.
+The image ships exactly one known credential, it is unusable remotely, and step 3 removes it. None of this is needed on a host provisioned through the ESP: stage `ssh.authorized_keys.root` and a user credential before the first boot and the console is never involved — see [Configuring a host before its first boot](#configuring-a-host-before-its-first-boot-esp-credentials).
 
 **SSH:**
 - Key-only (`PasswordAuthentication no`)

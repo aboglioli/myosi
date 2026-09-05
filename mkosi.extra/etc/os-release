@@ -4,5 +4,8 @@ ID=myosi
 ID_LIKE=fedora
 VERSION_ID=44
 VARIANT_ID=myosi
+# Fallback when no firstboot.hostname credential resolves; systemd uses this
+# instead of "localhost". /etc/hostname is deliberately not shipped.
+DEFAULT_HOSTNAME=myosi
 ANSI_COLOR="0;38;2;60;110;180"
 HOME_URL="https://github.com/aboglioli/myosi"

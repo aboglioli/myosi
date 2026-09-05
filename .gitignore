@@ -64,3 +64,4 @@ mkosi.output/
 *.swp
 *.swo
 .DS_Store
+credentials/*.cred

@@ -1,10 +1,15 @@
 # User management.
 #
-# Creating a user is a one-time act that cannot happen before first boot:
-# /home lives on the data-luks pool, and systemd-repart only creates that
-# pool the first time the image boots. So there is nothing to bake into the
-# image and no point provisioning at build time — unlike mybox, which is a
+# Creating a user cannot happen at BUILD time: /home lives on the data-luks
+# pool, and systemd-repart only creates that pool the first time the image
+# boots. So there is nothing to bake into the image — unlike mybox, which is a
 # container and can take its user from env vars at start.
+#
+# It can however be DECLARED before first boot, on the one surface that is
+# writable by then: a home.create.<name> or sysusers.extra credential on the
+# ESP, materialised during the first boot by systemd-homed-firstboot /
+# systemd-sysusers. See credentials/README.md. These recipes remain the path
+# for a host that is already running.
 #
 # The split: these recipes are the operator action, myosi-users.service is
 # the upkeep. Creation is one-shot; group membership, subuid ranges and
