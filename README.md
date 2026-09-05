@@ -1948,6 +1948,14 @@ sudo systemd-creds encrypt --with-key=null --name=ssh.authorized_keys.root \
 `--name=` must match the filename minus `.cred`, or the credential is
 imported under the wrong name and silently ignored.
 
+Be clear-eyed about what that buys: the null key is a constant compiled
+into systemd, so anyone can decrypt or forge one. It provides no
+confidentiality and no authenticity — it satisfies the format requirement
+and nothing else, which is exactly why systemd refuses it on a host with
+Secure Boot and a TPM. Public keys and password hashes belong on an ESP;
+real secrets never do. For those, use `/etc/credstore.encrypted/` with
+`--with-key=tpm2` once the host exists.
+
 ### How the credential arrives
 
 `systemd-stub`, the EFI entry point inside the UKI, scans the ESP it was
