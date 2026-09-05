@@ -163,7 +163,7 @@ files referenced; this is the operator/contributor map.
 | `/srv`, `/mnt` → `var/mnt` | `/srv` is a dedicated btrfs subvolume from `data-luks`; `/mnt` is symlinked into writable `/var`. | `/srv` and `/mnt` targets are operator-mutable. |
 | `/mnt/backups` → `/var/mnt/backups` | Dedicated btrfs subvolume from `data-luks`, mounted **only on demand** by `var-mnt-backups.mount`. Absent from the mount table until an operator starts it. | Operator-mutable, unmounted by default. |
 | `/var/lib/machines/` | Per-machine btrfs subvolumes for `systemd-nspawn` containers managed by `machinectl`. | Operator-mutable. |
-| `/usr/libexec/myosi/` | Shipped helper scripts (`sysext-modules-refresh`, `user-provision`, `sysext-select`, `install`, `lib.sh`). | Image-coupled. |
+| `/usr/libexec/myosi/` | Shipped helper scripts (`sysext-modules-refresh`, `sysext-select`, `sysext-wants`, `user-provision`, `user-sweep`, `power-tune`, `install`, `lib.sh`). | Image-coupled. |
 
 ### On-demand mounts: the `backups` subvolume
 
@@ -1150,22 +1150,25 @@ line at deactivation on a record that already reports
 
 **First-boot flow:**
 
-1. `myosi-sshd-hostkeys.service` generates rsa+ecdsa+ed25519 host keys
-   sequentially in `/etc/ssh/` (preserved from the overlay era as
-   belt-and-suspenders; the /etc subvol is a plain filesystem so the
-   parallel `sshd-keygen@*` race no longer applies, but the
-   sequential generator costs nothing and keeps logs readable).
-2. `systemd-homed.service` starts. **No user is provisioned** —
-   `myosi-users.service` ships disabled and no record is baked, so nothing
-   calls `homectl create`. (On images that pre-bake an identity via a private
-   overlay, the enabled `@<name>` instance runs `user-provision
-   <name>` here, seeding the LUKS keyslot from the `MYOSI_BOOTSTRAP_PASSWORD`
-   env default via `PASSWORD`/`NEWPASSWORD`.)
-3. Operator logs in at the console as `root` / `changeme`, runs
-   `homectl create <you> --uid=1000 ...` to create the real user, then
-   `passwd -l root`. See [Post-installation](#post-installation).
-4. (Optional) Operator runs `sudo loginctl enable-linger <you>`
-   if they want rootless quadlets to keep running across reboots.
+1. Fedora's `sshd-keygen@.service` instances generate the host keys into
+   `/etc/ssh/`. `myosi-sysext-relabel.service` orders itself
+   `Before=sshd-keygen.target` so they land with the right SELinux labels.
+2. `systemd-firstboot.service` and `systemd-sysusers.service` apply the
+   identity credentials — hostname, locale, timezone, root password — taking
+   the ESP's values if the installer staged any and the
+   `/usr/lib/credstore/` defaults otherwise. `systemd-vconsole-setup.service`
+   does the same for keymap and font, on this and every later boot.
+3. `systemd-homed.service` starts, then `systemd-homed-firstboot.service`
+   materialises any `home.create.<name>` credential. A classic user declared
+   through `sysusers.extra` was already created in step 2. **With no
+   credential, no interactive user is provisioned** — the image bakes none,
+   because homed cannot rename a user later.
+4. If nothing was staged, the operator logs in at the console as `root` /
+   `changeme` and runs `myosi user-create <you> ...`, then `passwd -l root`.
+   See [Post-installation](#post-installation).
+5. (Optional) Operator runs `sudo loginctl enable-linger <you>`
+   if they want rootless quadlets to keep running across reboots — or
+   declares it up front with a `tmpfiles.extra` credential.
    Linger is NOT enabled by default, and on a LUKS-backed homed user it
    cannot give you an unlocked home at boot. **systemd-homed has no TPM2
    support** (no `--tpm2-device`; it offers password, PKCS#11, FIDO2 and
@@ -1181,7 +1184,7 @@ line at deactivation on a record that already reports
 
 | Path | State on fresh install | Notes |
 |------|------------------------|-------|
-| `/etc/shadow` `root` | bootstrap password `changeme` | **Console only** — sshd offers no password method. Destroy it with `passwd -l root` once your user works |
+| `/etc/shadow` `root` | locked in the image; `systemd-firstboot` sets the bootstrap password `changeme` from `/usr/lib/credstore/passwd.hashed-password.root`, or whatever the ESP staged instead | **Console only** — sshd offers no password method. Destroy it with `passwd -l root` once your user works |
 | `/etc/ssh/sshd_config.d/50-myosi.conf` | `PermitRootLogin prohibit-password`, `PasswordAuthentication no`, `AuthenticationMethods publickey` | Root SSH via publickey only. The bootstrap password is **not** remotely usable |
 | baked authorized_keys | none in the public image | Root SSH won't work until a key is shipped (overlay, `/etc` drop-in, or credential) |
 | interactive user | **none** | You create it on first boot — see [Post-installation](#post-installation) |
@@ -2915,14 +2918,14 @@ overrides the calculation.
 
 Hashes are baked into `mkosi.extra/etc/shadow` (sha-512 + fixed salt for reproducible builds). `systemd-sysusers` preserves shipped shadow entries on first boot, so the hash survives user creation.
 
-`sysusers.d` has **no password column** in its format (6 fields: `TYPE NAME ID GECOS HOME SHELL`), so the only declarative path for shipping a default password is `/etc/shadow` itself. A 7th column triggers `Trailing garbage.` from `systemd-sysusers` and the entry is dropped — verified the hard way during the password-bootstrap refactor.
+`sysusers.d` has **no password column** in its format (6 fields: `TYPE NAME ID GECOS HOME SHELL`) — a 7th column triggers `Trailing garbage.` from `systemd-sysusers` and the entry is dropped, verified the hard way during the password-bootstrap refactor. The declarative path for a default root password is therefore the `passwd.hashed-password.root` credential, defaulted in `/usr/lib/credstore/` and overridable from the ESP; `/etc/shadow` ships root **locked** so that credential stays reachable.
 
 **Bootstrap flow on a fresh install:**
 1. Log in at the **console** as `root` / `changeme`. (Not over SSH — sshd is publickey-only.)
-2. `homectl create <you> --uid=1000 ...` — create the real, properly-named user. See [Post-installation](#post-installation) for the full command and why the name can't be changed later.
+2. `myosi user-create <you> homed 1000 wheel,video,render,input,kvm` — create the real, properly-named user. See [Post-installation](#post-installation) for the parameters and why the name can't be changed later.
 3. Verify `<you>` can log in on another TTY, then `passwd -l root` to destroy the bootstrap credential.
 
-The image ships exactly one known credential, it is unusable remotely, and step 3 removes it. Override the baked hash for real fleets via `mkosi.local.conf` `ExtraTrees=`.
+The image ships exactly one known credential, it is unusable remotely, and step 3 removes it. None of this is needed on a host provisioned through the ESP: stage `ssh.authorized_keys.root` and a user credential before the first boot and the console is never involved — see [Configuring a host before its first boot](#configuring-a-host-before-its-first-boot-esp-credentials).
 
 **SSH:**
 - Key-only (`PasswordAuthentication no`)
