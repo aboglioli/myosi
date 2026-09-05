@@ -23,9 +23,9 @@ in some configurations. All measured on this image:
 
 **ESP credentials therefore do not work on a Secure Boot host with a TPM**,
 which is myosi's target profile. The rejection is graceful — the host boots
-fine and ignores them — but nothing is applied. Until a signed UKI addon
-path exists (see the README chapter), such hosts are configured after their
-first boot, or from a private image.
+fine and ignores them — but nothing is applied. For those hosts, bake the
+key into a private image with `mkosi.local.conf` `ExtraTrees=` (see the
+README chapter), or configure them after the first boot.
 
 ```bash
 sudo systemd-creds encrypt --with-key=null --name=ssh.authorized_keys.root \

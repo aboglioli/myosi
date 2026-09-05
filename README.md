@@ -1928,13 +1928,17 @@ present! Accepting anyway, since SecureBoot is disabled.
 which is myosi's own target profile. They do work on a TPM-less host with
 Secure Boot on, and on anything with Secure Boot off.
 
-For the SB+TPM case the credential has to arrive over a path the firmware
-already trusts. The obvious candidate is a **UKI addon signed with
-`boot.key`**, dropped in `$ESP/loader/addons/` — sd-stub validates addons
-against Secure Boot before loading, so the content would be trusted rather
-than `@encrypted`. That is unimplemented and untested; until it exists,
-a headless SB+TPM host is provisioned after its first boot, or from a
-private image built with `mkosi.local.conf` `ExtraTrees=`.
+**For an SB+TPM host, bake the key into a private image instead.**
+`mkosi.local.conf` with `ExtraTrees=` overlaying your public key onto
+`/usr/share/myosi/ssh/authorized_keys.d/root` puts it in the
+verity-protected, signature-covered `/usr`, which is strictly stronger than
+anything the ESP can offer — no new trust path, and the boot signing key
+never leaves the build host. The cost is that such an image is not the
+public generic one, so it needs its own release channel for `sysupdate`.
+
+Everything else on that host still comes from the ESP after its first boot,
+through `/etc/credstore/`, which is on the writable `/etc` overlay and is a
+trusted source.
 
 ```bash
 sudo systemd-creds encrypt --with-key=null --name=ssh.authorized_keys.root \
