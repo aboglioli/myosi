@@ -227,7 +227,9 @@ feature_disable() {
 }
 
 refresh_sysext() {
-    systemctl enable systemd-sysext.service >/dev/null 2>&1 || true
+    # Enablement is the preset's job (40-myosi-fedora.preset), not this
+    # function's — a second place that turns units on is a second place to
+    # look when one is unexpectedly off.
     systemctl restart systemd-sysext.service 2>/dev/null || {
         echo "Extension merge not active. Reboot to activate." >&2
         return

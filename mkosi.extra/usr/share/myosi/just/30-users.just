@@ -72,7 +72,6 @@ user-create name storage="classic" uid="" groups="" shell="" realname="":
     echo "wrote $dest:"
     sed 's/^/    /' "$dest"
 
-    systemctl enable myosi-users.service >/dev/null 2>&1 || true
     echo "provisioning..."
     /usr/libexec/myosi/user-provision --storage='{{storage}}' "$name"
     echo
