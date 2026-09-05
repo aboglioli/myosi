@@ -79,12 +79,48 @@ docs describe a newer systemd and list credentials 259 does not have.
 | `passwd.shell.root` | root's shell |
 | `firstboot.timezone` | `/etc/localtime` |
 | `firstboot.locale`, `firstboot.keymap` | only if `/etc/locale.conf` / `/etc/vconsole.conf` are absent — they are **not**, both ship in RPMs |
-| `sysusers.extra` | classic users |
-| `home.create.<name>` | homed users |
 | `tmpfiles.extra` | arbitrary `tmpfiles.d` lines — the general-purpose lever |
+| `network.dns`, `network.search_domains` | resolver, via `systemd-resolved` |
 | ~~`firstboot.hostname`~~ | **does not exist in 259** |
 | ~~`system.hostname`~~, ~~`system.machine_id`~~ | **not in 259's PID 1** |
 | ~~`network.network.*`~~ | generates networkd config; myosi is NetworkManager-only |
+
+## Users: declare a record, do not create the account
+
+**Do not use `home.create.<name>` or `sysusers.extra`.** Both were tried and
+removed. Measured on this image:
+
+- `home.create.<name>` is unusable on systemd 259 at all. With a `secret`
+  section homed rejects the whole record — `Failed to execute operation:
+  Invalid argument` — and without one `homectl` blocks on an interactive
+  password prompt that a credential cannot answer.
+- Both bypass `/usr/libexec/myosi/user-provision`, so the account gets **no
+  subuid/subgid range** (rootless podman broken), no sysext group bindings
+  and no linger. `user-sweep` never adopts it either, because it only scans
+  `/etc/myosi/users/` and `/usr/share/myosi/users/`.
+
+Write the **identity record** instead and let `myosi-users.service` create
+the account on the same boot:
+
+```
+f+ /etc/myosi/users/alan.user 0644 root root - {"userName":"alan","uid":1000,...}
+```
+
+That routes creation through `user-provision`, which is the path that
+already gets the storage flags right. Verified on a booted host:
+
+```
+LUKS Discard: online=yes offline=no      Auto Resize: grow
+File System: btrfs                       Disk Size: 14.3G (computed)
+groups: wheel video render input kvm libvirt incus-admin
+/etc/subuid:alan:100000:1000000
+```
+
+and `PASSWORD=changeme homectl authenticate alan` succeeds.
+
+Drop `"service":"io.systemd.Home"` from the record for a classic user — the
+right choice on a headless host, where an encrypted home never unlocks and
+linger plus rootless quadlets are what you want.
 
 ## Hostname, and anything else without a credential
 

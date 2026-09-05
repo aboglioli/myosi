@@ -1985,14 +1985,47 @@ reads.
 | `ssh.authorized_keys.root` | root's keys. `sshd` reads it directly, and `tmpfiles.d/myosi.conf` copies it to `/etc/ssh/authorized_keys.d/root`, so one delivery is permanent |
 | `passwd.hashed-password.root`, `passwd.shell.root` | root password and shell, first boot only |
 | `firstboot.timezone` | `/etc/localtime` |
-| `sysusers.extra` | classic users |
-| `home.create.<name>` | homed users, full JSON record |
+| ~~`sysusers.extra`~~, ~~`home.create.<name>`~~ | **do not use** — see below |
 | `tmpfiles.extra` | arbitrary `tmpfiles.d` lines — the general-purpose lever |
 | `network.dns`, `network.search_domains` | resolver, via `systemd-resolved` |
 | **`firstboot.hostname`** | **does not exist in 259** |
 | **`system.hostname`**, `system.machine_id` | **not in 259's PID 1** |
 | `firstboot.locale`, `firstboot.keymap` | inert — `/etc/locale.conf` and `/etc/vconsole.conf` ship in RPMs, and firstboot only fills in values that are unset |
 | `network.network.*`, `link.*`, `netdev.*` | inert — generates networkd config, and myosi is NetworkManager-only |
+
+### Users: declare a record, do not create the account
+
+`home.create.<name>` and `sysusers.extra` were both tried and removed.
+Measured on this image:
+
+- `home.create.<name>` cannot work on systemd 259. With a `secret` section
+  homed rejects the entire record (`Failed to execute operation: Invalid
+  argument`); without one, `homectl` blocks on an interactive password
+  prompt a credential cannot answer.
+- Both bypass `/usr/libexec/myosi/user-provision`, so the account gets **no
+  subuid/subgid range** — rootless podman broken — plus no sysext group
+  bindings and no linger. `user-sweep` never adopts it either: it only scans
+  `/etc/myosi/users/` and `/usr/share/myosi/users/`.
+
+Write the identity record through `tmpfiles.extra` instead, and let
+`myosi-users.service` create the account on the same boot:
+
+```
+f+ /etc/myosi/users/alan.user 0644 root root - {"userName":"alan","uid":1000,...}
+```
+
+Creation then goes through `user-provision`, the path that already gets the
+storage flags right. Verified on a booted host:
+
+```
+LUKS Discard: online=yes offline=no      Auto Resize: grow
+File System: btrfs                       Disk Size: 14.3G (computed, not fixed)
+groups: wheel video render input kvm libvirt incus-admin
+/etc/subuid:alan:100000:1000000
+```
+
+and `PASSWORD=changeme homectl authenticate alan` succeeds. Drop
+`"service":"io.systemd.Home"` for a classic user.
 
 ### Hostname, and anything else with no credential
 
