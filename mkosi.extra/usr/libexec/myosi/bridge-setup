@@ -87,7 +87,11 @@ do_status() {
 
 do_create() {
     if ip link show "$BRIDGE" >/dev/null 2>&1; then
+        # Report it instead of just accepting it: an existing bridge with no
+        # slave reaches nothing, and staying quiet here lets virt-setup define
+        # a libvirt network on top of a dead uplink.
         echo "Bridge $BRIDGE already exists."
+        do_status
         return 0
     fi
 
