@@ -126,8 +126,11 @@ do_create() {
     trap restore EXIT
 
     echo "Creating $BRIDGE with $IFACE as slave..."
+    # autoconnect-slaves: without it `nmcli con up $BRIDGE` activates the
+    # master alone, leaving a bridge holding the host's IP and no uplink.
     nmcli con add type bridge ifname "$BRIDGE" con-name "$BRIDGE" \
         bridge.stp no bridge.mac-address "$mac" \
+        connection.autoconnect-slaves yes \
         ipv4.method auto ipv6.method auto
     nmcli con add type ethernet ifname "$IFACE" master "$BRIDGE" con-name "$BRIDGE-$IFACE"
     [ -n "$old" ] && nmcli con down "$old" >/dev/null 2>&1 || true
