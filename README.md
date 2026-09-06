@@ -1821,8 +1821,16 @@ sudo systemd-run --on-active=180 nmcli con up "$OLD_CONNECTION"
 VM disks live under `/var/lib/libvirt/images`; ISOs under
 `/var/lib/libvirt/isos`. These upstream-canonical paths line up with
 stock SELinux policy (`virt_image_t` / `virt_content_t`) — no aliases or
-local rules needed. `/var/lib/libvirt` is NoCOW via the base
-`tmpfiles.d`, so new qcow2 files inherit `+C`.
+local rules needed.
+
+`images/` carries its own `+C` from the virt `tmpfiles.d` drop-in, so new
+qcow2 files are NoCOW. It needs its own line: the `+C` the base
+`tmpfiles.d` stamps on `/var/lib/libvirt` never reaches inside it, because
+that parent is only created implicitly beneath `images/`, btrfs applies
+`+C` only to entries created after the flag is set, and `h` is not
+recursive. Check it with `lsattr -d /var/lib/libvirt/images`, and on a host
+built before this was fixed set it by hand **while the directory is still
+empty** — `+C` does not convert files that already exist.
 
 **Wireless hosts cannot do this.** A station-mode 802.11 link drops
 frames whose source MAC is not the associated station's, so a bridged
