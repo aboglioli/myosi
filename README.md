@@ -1773,29 +1773,50 @@ sudo btrfs scrub start -Bd /var
 sudo btrfs scrub status /var
 ```
 
-#### 3j. Virt host integration, if the `virt` sysext is enabled
+#### 3j. Host LAN bridge (base image, any profile)
 
-Skip if you did not enable `virt`. The base image ships no libvirt
-configs — they live in a single setup script under the virt sysext
-itself. Running it once provisions exactly two things:
-
-- A host NetworkManager bridge `br0`, enslaving your default-route
-  physical iface, so guests attached to it are LAN peers with their own
-  MAC and a router-assigned IP. `br0` takes the slave's MAC, so the host
-  keeps its own DHCP reservation.
-- The matching libvirt network `br0` (`<forward mode='bridge'/>`).
+`br0` is what lets anything on this host be a peer on the physical LAN
+instead of hiding behind the host's address. One bridge serves every
+consumer, which is why it ships in the base image rather than in a
+sysext: a containers-only host wants the same link, and reaching it
+through the `virt` sysext meant installing qemu to get a bridge.
 
 ```bash
-sudo /usr/libexec/myosi/virt-setup
+sudo myosi bridge-create
 
 # If the auto-detected iface is wrong:
-sudo /usr/libexec/myosi/virt-setup --bridge-iface=enp3s0
+sudo myosi bridge-create --iface=enp3s0
+
+# The bridge, its slaves, its address:
+myosi bridge-status
+
+# Undo — the physical iface gets a plain connection back:
+sudo myosi bridge-delete
 ```
 
-Idempotent — every step checks first, so it is safe to re-run after a
-partial failure.
+`bridge-create` enslaves the default-route iface and moves the host's
+address onto the bridge, which takes the slave's MAC so the host keeps
+its own DHCP reservation. Idempotent — every step checks first, so it is
+safe to re-run after a partial failure. `--name=` builds a differently
+named bridge when one is not enough.
 
-**Over SSH.** The bridge step takes the physical iface down for 5-30 s
+What can attach to it:
+
+| Consumer | How |
+|---|---|
+| libvirt | `<interface type='network'><source network='br0'/>` — step 3k defines that network |
+| podman | a `.network` with `Driver=bridge`, `InterfaceName=br0`, `Options=mode=unmanaged`: podman adds a veth and manages nothing else — no NAT, no firewall rules, no port forwarding |
+| Incus | `nictype=bridged, parent=br0` |
+
+A bridge port and a macvlan child are not interchangeable here. macvlan
+also gives a container its own LAN address, but the kernel isolates a
+macvlan child from its parent, so **the host cannot talk to it**; a veth
+on `br0` has no such limit. macvlan is also impossible once the NIC is
+enslaved — `ip link add link enp3s0 ... type macvlan` fails with `Device
+or resource busy` — so on a bridged host the unmanaged-bridge network is
+how a container gets its own LAN IP.
+
+**Over SSH.** `bridge-create` takes the physical iface down for 5-30 s
 while `br0` inherits its address. If anything fails between those two
 points the script restores the previous connection on the way out, but
 on a headless host a dead-man's switch is still the cheap insurance:
@@ -1803,6 +1824,36 @@ on a headless host a dead-man's switch is still the cheap insurance:
 ```bash
 sudo systemd-run --on-active=180 nmcli con up "$OLD_CONNECTION"
 ```
+
+**Wireless hosts cannot do this.** A station-mode 802.11 link drops
+frames whose source MAC is not the associated station's, so a bridged
+guest's traffic disappears. The script refuses to enslave a wireless
+iface rather than build a bridge that silently fails. On a laptop, pass
+`--iface=<ethernet>` with a cable in.
+
+**`br_netfilter`.** libvirt loads this module, and once loaded it can push
+bridged frames through nftables — where firewalld's zone for `br0` starts
+applying to traffic that is supposed to be plain L2. `myosi bridge-status`
+warns when `bridge-nf-call-iptables` is on; set it to 0 if attached guests
+lose LAN traffic for no visible reason.
+
+#### 3k. Virt host integration, if the `virt` sysext is enabled
+
+Skip if you did not enable `virt`. The base image ships no libvirt
+configs — they live in a single setup script under the virt sysext
+itself. Running it once defines the libvirt network `br0`
+(`<forward mode='bridge'/>`) that points at the bridge from step 3j,
+creating that bridge first if it does not exist yet:
+
+```bash
+sudo myosi virt-setup
+
+# Pass the iface through when the bridge has still to be created:
+sudo myosi virt-setup --bridge-iface=enp3s0
+```
+
+Idempotent — every step checks first, so it is safe to re-run after a
+partial failure.
 
 **What it deliberately does NOT do:**
 
@@ -1823,12 +1874,6 @@ VM disks live under `/var/lib/libvirt/images`; ISOs under
 stock SELinux policy (`virt_image_t` / `virt_content_t`) — no aliases or
 local rules needed. `/var/lib/libvirt` is NoCOW via the base
 `tmpfiles.d`, so new qcow2 files inherit `+C`.
-
-**Wireless hosts cannot do this.** A station-mode 802.11 link drops
-frames whose source MAC is not the associated station's, so a bridged
-guest's traffic disappears. The script refuses to enslave a wireless
-iface rather than build a bridge that silently fails. On a laptop, pass
-`--bridge-iface=<ethernet>` with a cable in.
 
 Attach a guest:
 
@@ -2257,7 +2302,7 @@ libvirt copy it per domain. `restorecon` matters — an nvram or disk file
 carrying a scratch-directory label is denied by svirt with an error that
 reads like a firmware problem. Needs `virtqemud.socket` (or `libvirtd`)
 running and the `default` network active; both come with the `virt`
-profile (step 3j).
+profile (step 3k).
 
 ### Getting in on the first boot
 
@@ -3204,7 +3249,7 @@ just install /dev/nvme0n1 /dev/sdb   # clone the booted USB onto NVMe
 
 The `myosi` wrapper only handles **myosi-specific orchestration**: sysupdate (GitHub releases), sysext feature management, and the install script. Everything else (LUKS keyslots, btrfs subvols, snapshots, portable services, credentials) is run with the upstream tool directly — see the post-install runbook (under Installing to real hardware) for the manual commands.
 
-The wrapper scans `/usr/share/myosi/just/` (base modules `00-update.just`, `10-extensions.just`, `40-install.just`) and any sysext-provided modules (e.g. `50-virt.just`) at every invocation, emitting a transient justfile in `/run/myosi/`. Sysexts can add their own operator commands without the base image knowing about them. Run `myosi --list` to see what's currently available.
+The wrapper scans `/usr/share/myosi/just/` (base modules `00-update.just`, `10-extensions.just`, `25-network.just`, `40-install.just`) and any sysext-provided modules (e.g. `50-virt.just`) at every invocation, emitting a transient justfile in `/run/myosi/`. Sysexts can add their own operator commands without the base image knowing about them. Run `myosi --list` to see what's currently available.
 
 ```bash
 sudo myosi extension-enable   NAME [VERSION]   # enable a sysext feature
@@ -3214,6 +3259,9 @@ sudo myosi update                              # stage base + sysexts + machines
 sudo myosi update --refresh                    # …plus live sysext refresh
 sudo myosi status                              # update + sysext state
 sudo myosi vacuum                              # remove old generations
+sudo myosi bridge-create      [--iface=IF]     # LAN bridge br0 for guests (step 3j)
+     myosi bridge-status                       # bridge, slaves, address
+sudo myosi bridge-delete                       # remove it, restore the plain iface
 sudo myosi install             /dev/sdX [SRC]  # write a release to disk
 ```
 
