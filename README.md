@@ -3179,7 +3179,7 @@ Built from `mkosi.conf` `KernelCommandLine=`. Highlights:
 - `mitigations=auto,nosmt page_alloc.shuffle=1 randomize_kstack_offset=on vsyscall=none debugfs=off`
 - `selinux=1 enforcing=1`
 - `systemd.unified_cgroup_hierarchy=1 cgroup_no_v1=all`
-- `iommu=pt intel_iommu=on amd_iommu=on` (vendor-agnostic, kernel ignores wrong vendor)
+- `iommu=pt intel_iommu=on` — `iommu=pt` sets the passthrough domain type on both vendors, Intel needs `intel_iommu=on`, and AMD-Vi enables itself from IVRS (it rejects `amd_iommu=on` outright)
 - `module_blacklist=nouveau,nova_core,iTCO_wdt,iTCO_vendor_support,sp5100_tco` — single source of truth for "this module never loads" policy. UKI cmdline is the canonical home; modprobe.d files inside sysexts carry MODULE OPTIONS only.
 - `transparent_hugepage=madvise`
 - Verbose boot: no `quiet`, `loglevel=4`, `rd.systemd.show_status=true systemd.show_status=true`, `console=tty0` only (qemu adds `console=ttyS0` via mkosi.local.conf)
