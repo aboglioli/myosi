@@ -65,3 +65,6 @@ mkosi.output/
 *.swo
 .DS_Store
 credentials/*.cred
+
+# Feature worktrees
+.worktrees/
