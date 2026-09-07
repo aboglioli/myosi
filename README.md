@@ -1826,11 +1826,11 @@ local rules needed.
 `images/` carries its own `+C` from the virt `tmpfiles.d` drop-in, so new
 qcow2 files are NoCOW. It needs its own line: the `+C` the base
 `tmpfiles.d` stamps on `/var/lib/libvirt` never reaches inside it, because
-that parent is only created implicitly beneath `images/`, btrfs applies
-`+C` only to entries created after the flag is set, and `h` is not
-recursive. Check it with `lsattr -d /var/lib/libvirt/images`, and on a host
-built before this was fixed set it by hand **while the directory is still
-empty** — `+C` does not convert files that already exist.
+that parent only comes into existence as an implicit parent of `images/`,
+btrfs applies `+C` only to entries created after the flag is set, and `h`
+is not recursive. Check it with `lsattr -d /var/lib/libvirt/images`, and on
+a host built before this was fixed set it by hand **while the directory is
+still empty** — `+C` does not convert files that already exist.
 
 **Wireless hosts cannot do this.** A station-mode 802.11 link drops
 frames whose source MAC is not the associated station's, so a bridged
