@@ -78,11 +78,32 @@ check "/srv/users is 1777" "1777" "$(stat -c %a /srv/users 2>/dev/null)"
 
 echo "== NoCOW policy =="
 nocow() { lsattr -d "$1" 2>/dev/null | awk '{print $1}' | grep -q C && echo yes || echo no; }
-check "/var/lib/containers NOT NoCOW" "no"  "$(nocow /var/lib/containers)"
+# +C is for data overwritten IN PLACE and nothing else: it implies nodatasum
+# and disables compression, and /var mounts compress=zstd:3. /var/tmp is the
+# only path we flag wholesale — nothing in it outlives the next boot.
 check "/var/tmp is NoCOW"             "yes" "$(nocow /var/tmp)"
-check "/var/cache is NoCOW"           "yes" "$(nocow /var/cache)"
+check "/var/lib/containers NOT NoCOW" "no"  "$(nocow /var/lib/containers)"
+check "/var/cache NOT NoCOW"          "no"  "$(nocow /var/cache)"
 # systemd's journal-nocow.conf owns this one, not us.
 check "/var/log/journal is NoCOW"     "yes" "$(nocow /var/log/journal)"
+# The virt profile flags images/ alone. The PARENT must stay unflagged: +C is
+# inherited only by entries created afterwards, so flagging it leaked NoCOW
+# into whatever libvirt made next — swtpm/ came up NoCOW on one host and CoW
+# on another purely on creation order.
+if [ -d /var/lib/libvirt/images ]; then
+    check "/var/lib/libvirt/images is NoCOW" "yes" "$(nocow /var/lib/libvirt/images)"
+    check "/var/lib/libvirt NOT NoCOW"       "no"  "$(nocow /var/lib/libvirt)"
+else
+    echo "  SKIP  /var/lib/libvirt absent (no virt profile)"
+fi
+# /var/lib/incus cannot be checked by behaviour: nothing creates it at boot,
+# so a re-added +C line would leave the path missing and pass silently.
+# Assert the config instead.
+if grep -qE '^h[[:space:]]+/var/(cache|lib/(incus|libvirt))[[:space:]]' /usr/lib/tmpfiles.d/myosi.conf 2>/dev/null; then
+    bad "no blanket +C on cache/incus/libvirt" "a parent +C line came back"
+else
+    ok "no blanket +C on cache/incus/libvirt"
+fi
 
 echo "== mounts =="
 for u in var.mount home.mount srv.mount; do
