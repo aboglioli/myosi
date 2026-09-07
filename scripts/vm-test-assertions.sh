@@ -105,6 +105,55 @@ else
     ok "no blanket +C on cache/incus/libvirt"
 fi
 
+echo "== libvirt first-boot tree (only when the virt profile is present) =="
+# repart leaves /var empty, so every RPM-owned path under it is gone and the
+# profile's tmpfiles drop-in has to put these back. virtlogd could not create
+# /var/log/libvirt itself: every domain start failed with
+# "Unable to open /var/log/libvirt/qemu/<domain>.log: Permission denied".
+# tmpfiles also applies the file_contexts label rather than the parent's,
+# which is why qemu/ can be qemu_var_run_t under a virt_var_lib_t parent.
+if command -v virsh >/dev/null 2>&1; then
+    check "/var/lib/libvirt/images virt_image_t"   "virt_image_t"   "$(setype /var/lib/libvirt/images)"
+    check "/var/lib/libvirt/isos   virt_content_t" "virt_content_t" "$(setype /var/lib/libvirt/isos)"
+    check "/var/lib/libvirt/boot   virt_content_t" "virt_content_t" "$(setype /var/lib/libvirt/boot)"
+    check "/var/lib/libvirt/qemu   qemu_var_run_t" "qemu_var_run_t" "$(setype /var/lib/libvirt/qemu)"
+    check "/var/log/libvirt        virt_log_t"     "virt_log_t"     "$(setype /var/log/libvirt)"
+    check "/var/cache/libvirt      virt_cache_t"   "virt_cache_t"   "$(setype /var/cache/libvirt)"
+    # setgid, so images dropped in by a member of qemu stay group-writable.
+    check "/var/lib/libvirt/images is 2775"  "2775"      "$(stat -c %a /var/lib/libvirt/images 2>/dev/null)"
+    check "/var/lib/libvirt/images owner"    "qemu:qemu" "$(stat -c %U:%G /var/lib/libvirt/images 2>/dev/null)"
+else
+    echo "  SKIP  virsh not in this image (no virt profile)"
+fi
+
+echo "== kernel command line =="
+# amd_iommu=on was never a valid option: AMD-Vi logs "Unknown option - 'on'"
+# and enables itself from IVRS regardless. iommu=pt does the real work, and
+# intel_iommu=on is required because CONFIG_INTEL_IOMMU_DEFAULT_ON is unset.
+grep -qw 'amd_iommu=on' /proc/cmdline \
+    && bad "no amd_iommu=on (the kernel rejects it)" "still on the cmdline" \
+    || ok "no amd_iommu=on (the kernel rejects it)"
+for k in iommu=pt intel_iommu=on; do
+    grep -qw "$k" /proc/cmdline && ok "$k present" \
+        || bad "$k present" "missing from /proc/cmdline"
+done
+
+echo "== operator tooling =="
+# lspci used to arrive only as some sysext's transitive dependency, so a host
+# with none merged could not identify its own hardware.
+command -v lspci >/dev/null 2>&1 && ok "lspci present (pciutils in base)" \
+    || bad "lspci present (pciutils in base)" "missing"
+# The bridge lives in base, not the virt sysext: a containers-only host wants
+# the same link. Running it exercises the myosi wrapper's directory scan too.
+[ -x /usr/libexec/myosi/bridge-setup ] && ok "bridge-setup ships in base" \
+    || bad "bridge-setup ships in base" "missing or not executable"
+if BRIDGE_OUT=$(/usr/local/bin/myosi bridge-status 2>&1) \
+        && printf '%s' "$BRIDGE_OUT" | grep -q br0; then
+    ok "myosi bridge-status dispatches"
+else
+    bad "myosi bridge-status dispatches" "$(printf '%s' "$BRIDGE_OUT" | head -1)"
+fi
+
 echo "== mounts =="
 for u in var.mount home.mount srv.mount; do
     check "$u active" "active" "$(systemctl is-active "$u" 2>/dev/null)"
