@@ -1882,14 +1882,29 @@ VM disks live under `/var/lib/libvirt/images`; ISOs under
 stock SELinux policy (`virt_image_t` / `virt_content_t`) — no aliases or
 local rules needed.
 
-`images/` carries its own `+C` from the virt `tmpfiles.d` drop-in, so new
-qcow2 files are NoCOW. It needs its own line: the `+C` the base
-`tmpfiles.d` stamps on `/var/lib/libvirt` never reaches inside it, because
-that parent only comes into existence as an implicit parent of `images/`,
-btrfs applies `+C` only to entries created after the flag is set, and `h`
-is not recursive. Check it with `lsattr -d /var/lib/libvirt/images`, and on
-a host built before this was fixed set it by hand **while the directory is
-still empty** — `+C` does not convert files that already exist.
+The whole `/var` tree libvirt needs is pre-created by the virt
+`tmpfiles.d` drop-in, because repart leaves `/var` empty on first boot and
+the daemons cannot always recreate their own directories — virtlogd could
+not make `/var/log/libvirt`, and every domain start failed with `Unable to
+open .../<domain>.log: Permission denied`. tmpfiles also applies the
+`file_contexts` label instead of whatever the parent carries, so a path
+whose policy type differs from its parent's (`qemu/` is `qemu_var_run_t`
+under a `virt_var_lib_t` parent) comes up right from the first boot.
+
+**`images/` is the only path flagged NoCOW**, which is the same scope
+libvirt uses when it builds a btrfs storage pool. A qcow2 is overwritten
+randomly and the guest checksums its own filesystem, so trading btrfs
+checksums away is fair — and it avoids the spurious checksum errors
+Windows guests produce under `cache=none`, having no stable pages.
+Everything else stays checksummed: `nvram/` and `swtpm/` are small, rarely
+written and precious. The parent `/var/lib/libvirt` is deliberately not
+flagged, because `+C` on a directory is inherited only by entries created
+afterwards — flagging it just leaked NoCOW into whatever libvirt created
+next, which is why `swtpm/` came out NoCOW on one host and CoW on another.
+
+Check with `lsattr -d /var/lib/libvirt/images`. On a host built before this
+was fixed, set it by hand **while the directory is still empty** — `+C`
+does not convert files that already exist.
 
 Attach a guest:
 
