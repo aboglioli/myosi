@@ -325,6 +325,14 @@ the codecs are fixed, because it allowlists user agents; that is a
 per-site `content.headers.user_agent` override in the user's own
 `~/.config/qutebrowser/config.py`, not an image concern.
 
+`qt6-qtwebengine-devtools` rides along because Fedora packages
+`qtwebengine_devtools_resources.pak` separately from the engine, and
+qutebrowser's `:devtools` (`wi`) refuses to open without it — the
+inspector reports "QtWebEngine devtools resources not found" instead of
+falling back to anything. Remote debugging over
+`qt.args = ["remote-debugging-port=..."]` works either way, since the
+attaching browser brings its own frontend.
+
 ### Kernel-module sysexts + the depmod overlay
 
 Kmod-shipping sysexts (`nvidia`, `nvidia-580xx`, `zfs`) deliver
