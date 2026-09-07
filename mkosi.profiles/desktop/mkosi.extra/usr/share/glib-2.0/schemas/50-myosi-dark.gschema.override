@@ -1,0 +1,23 @@
+# Dark preference for everything that does not read GTK_THEME.
+#
+# GTK_THEME=Adwaita-dark in 50-myosi-theme.conf reaches host GTK apps and
+# nothing else. Qt apps (QT_QPA_PLATFORMTHEME=xdgdesktopportal) and
+# flatpaks — which never see host env vars — ask xdg-desktop-portal
+# instead, and both the gtk and gnome backends answer from this GSettings
+# key. Stock 'default' means "no preference", the portal reports 0, and Qt
+# picks its light palette: qutebrowser rendered white chrome on an
+# otherwise dark desktop.
+#
+# Overriding the schema default fixes it for every user with no dconf
+# write; a user who set the key explicitly keeps their value, since dconf
+# outranks schema defaults. glib-compile-schemas picks this up through
+# myosi-glib-schemas-compile.service, which recompiles the post-merge
+# union of /usr/share/glib-2.0/schemas each boot — strip_to_sysext_layout
+# drops only the partial gschemas.compiled, never the XML or this file.
+#
+# gtk-theme is deliberately left alone: /usr/share/themes ships no
+# Adwaita-dark directory, so naming it here would be a claim about a
+# theme that may not resolve. GTK4/libadwaita follows color-scheme, and
+# host GTK3 already has the env var.
+[org.gnome.desktop.interface]
+color-scheme='prefer-dark'
