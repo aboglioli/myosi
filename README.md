@@ -3073,13 +3073,16 @@ Two podman behaviours that shaped this, both measured:
 
 Defaults inherited by dropping our config: `driver = overlay` (autodetected as overlay on btrfs even with the key absent), `mountopt = nodev,metacopy=on` from Fedora's vendor file — which costs `Native Overlay Diff` — `init = false`, and `compression_format = gzip`. The first is harmless; the rest are the price of carrying no configuration.
 
-**`/var/lib/containers` is deliberately *not* NoCOW.** `nodatacow` implies `nodatasum`, so scrub cannot verify a single byte of it, and it disables compression — measured on a host that had `+C` set: 8.7 G of layers at 0% compression, while the rootless store, which never inherited the flag, compresses 41% (432 M → 178 M). btrfs scopes `nodatacow` to frequent-overwrite workloads (databases, VM images); image layers are written once and read many times. No distribution's packaging sets `+C` here — the only upstream NoCOW policy is systemd's on `/var/log/journal`, and its own comment justifies that by journal files carrying internal checksums, which layer files do not. `/var/lib/libvirt` and `/var/lib/incus` keep `+C`: VM disk images are precisely the documented case.
+**`/var/lib/containers` is deliberately *not* NoCOW.** `nodatacow` implies `nodatasum`, so scrub cannot verify a single byte of it, and it disables compression — measured on a host that had `+C` set: 8.7 G of layers at 0% compression, while the rootless store, which never inherited the flag, compresses 41% (432 M → 178 M). btrfs scopes `nodatacow` to frequent-overwrite workloads (databases, VM images); image layers are written once and read many times. No distribution's packaging sets `+C` here — the only upstream NoCOW policy is systemd's on `/var/log/journal`, and its own comment justifies that by journal files carrying internal checksums, which layer files do not.
+
+The same reasoning retired every other blanket flag. `/var/lib/libvirt` now flags `images/` alone, the scope libvirt itself uses for a btrfs pool. `/var/lib/incus` is not flagged at all: its btrfs driver keeps a subvolume per instance, image and snapshot and takes a snapshot on every launch, so CoW *is* the storage model, and `nodatacow` there costs compression on VM disks as well. `/var/cache` is not flagged either — it is regenerable and holds the most compressible data in `/var`. `/var/tmp` is the only path left with `+C`, because nothing in it outlives the next boot. Flagging a parent to reach its children is the pattern to avoid: `+C` is inherited only by entries created afterwards, which is why libvirt's `swtpm/` came up NoCOW on one host and CoW on another.
 
 `tmpfiles.d` simply has no entry for the path, which sets policy for new files only — a host built when the `+C` line still existed keeps the inherited flag and must be cleared by hand once:
 
 ```bash
 sudo chattr -C /var/lib/containers /var/lib/containers/cache
-lsattr -d /var/lib/containers /var/lib/containers/cache
+sudo chattr -C /var/cache /var/lib/incus
+lsattr -d /var/lib/containers /var/lib/containers/cache /var/cache /var/lib/incus
 ```
 
 Clearing it on a directory only affects files created afterwards; btrfs refuses to flip a regular file that already has extents. Existing layers therefore stay uncompressed until they are re-pulled.
