@@ -187,19 +187,12 @@ kmod_unmount_all_under "$BUILDROOT"
 kmod_depmod_after_strip
 kmod_mark_indices_unique "nvidia${PKG_SUFFIX}"
 
-# Refuse to ship without nvidia.ko indexed. NVIDIA_BUILD_OPTIONAL=1
-# (legacy branch on a too-new kernel) ships an empty stub instead of
-# failing the release; hosts keep their last-good sysext.
-if ! kmod_indexed "extra/nvidia/nvidia.ko"; then
-    if [ "${NVIDIA_BUILD_OPTIONAL:-0}" = "1" ]; then
-        echo "WARN: nvidia.ko not indexed; NVIDIA_BUILD_OPTIONAL=1" >&2
-        kmod_ship_empty_stub "$EXT_REL_NAME" \
-            "kernel $KVER too new for $NVIDIA_BRANCH driver branch"
-        exit 0
-    fi
-    echo "ERROR: nvidia.ko not indexed in modules.dep after depmod." >&2
-    echo "       /usr/lib/modules/$KVER/ contents:" >&2
-    ls -la "$BUILDROOT/usr/lib/modules/$KVER/" >&2 || true
+# Refuse to ship without nvidia.ko indexed. Each kmod package installs
+# under its own extra/<kmod_name>/ directory.
+if ! kmod_indexed "extra/${KMOD_NAME}/nvidia.ko"; then
+    echo "ERROR: extra/${KMOD_NAME}/nvidia.ko not indexed in modules.dep after depmod." >&2
+    echo "       /usr/lib/modules/$KVER/extra/ contents:" >&2
+    ls -laR "$BUILDROOT/usr/lib/modules/$KVER/extra/" >&2 || true
     exit 1
 fi
 
