@@ -1812,7 +1812,7 @@ What can attach to it:
 
 | Consumer | How |
 |---|---|
-| libvirt | `<interface type='network'><source network='br0'/>` — step 3k defines that network |
+| libvirt | `<interface type='bridge'><source bridge='br0'/>` — no libvirt network needed, see step 3k |
 | podman | a `.network` with `Driver=bridge`, `InterfaceName=br0`, `Options=mode=unmanaged`: podman adds a veth and manages nothing else — no NAT, no firewall rules, no port forwarding |
 | Incus | `nictype=bridged, parent=br0` |
 
@@ -1845,37 +1845,27 @@ applying to traffic that is supposed to be plain L2. `myosi bridge-status`
 warns when `bridge-nf-call-iptables` is on; set it to 0 if attached guests
 lose LAN traffic for no visible reason.
 
-#### 3k. Virt host integration, if the `virt` sysext is enabled
+#### 3k. Virtual machines, if the `virt` sysext is enabled
 
-Skip if you did not enable `virt`. The base image ships no libvirt
-configs — they live in a single setup script under the virt sysext
-itself. Running it once defines the libvirt network `br0`
-(`<forward mode='bridge'/>`) that points at the bridge from step 3j,
-creating that bridge first if it does not exist yet:
+Skip if you did not enable `virt`. There is no setup step: guests attach
+straight to the bridge from step 3j with `<interface type='bridge'>`, so
+libvirt needs no network of its own for them. Create the bridge first
+(`sudo myosi bridge-create`), then define domains as usual.
 
-```bash
-sudo myosi virt-setup
+**What is deliberately not configured:**
 
-# Pass the iface through when the bridge has still to be created:
-sudo myosi virt-setup --bridge-iface=enp3s0
-```
-
-Idempotent — every step checks first, so it is safe to re-run after a
-partial failure.
-
-**What it deliberately does NOT do:**
-
-- *No NAT network.* `default`/`virbr0` exists for guests that must not
-  be on the LAN, which is the opposite of the point here. Define it from
-  `/usr/share/libvirt/networks/default.xml` if you ever want it.
+- *No libvirt network for `br0`.* A `<forward mode='bridge'/>` network
+  only gives the host bridge a name inside libvirt; `type='bridge'`
+  reaches the same bridge without it.
 - *No storage pools.* Domains reference disks by absolute path, and
   libvirt needs no pool for `<disk type='file'>`. Pools are a
   virt-manager convenience, not a requirement.
-- *No directory creation.* `/var/lib/libvirt/images` (2775 qemu:qemu)
-  and `/var/lib/libvirt/isos` come from the sysext's `tmpfiles.d`
-  drop-in, which is the single source of truth for their modes. Having
-  the script `mkdir` them too would silently produce different modes
-  whenever tmpfiles had not run.
+- *The `default` NAT network is left as libvirt ships it* (`virbr0`,
+  autostarted), for guests that must not be on the LAN.
+- *No directory creation by hand.* `/var/lib/libvirt/images` (2775
+  qemu:qemu) and `/var/lib/libvirt/isos` come from the sysext's
+  `tmpfiles.d` drop-in, which is the single source of truth for their
+  modes.
 
 VM disks live under `/var/lib/libvirt/images`; ISOs under
 `/var/lib/libvirt/isos`. These upstream-canonical paths line up with
@@ -1909,10 +1899,12 @@ does not convert files that already exist.
 Attach a guest:
 
 ```xml
-<interface type='network'>
-  <source network='br0'/>
+<interface type='bridge'>
+  <source bridge='br0'/>
 </interface>
 ```
+
+With `virt-install`, `--network bridge=br0`.
 
 Remote virt-manager (it is not in the sysext — Flathub, or another host):
 
@@ -3283,7 +3275,7 @@ just install /dev/nvme0n1 /dev/sdb   # clone the booted USB onto NVMe
 
 The `myosi` wrapper only handles **myosi-specific orchestration**: sysupdate (GitHub releases), sysext feature management, and the install script. Everything else (LUKS keyslots, btrfs subvols, snapshots, portable services, credentials) is run with the upstream tool directly — see the post-install runbook (under Installing to real hardware) for the manual commands.
 
-The wrapper scans `/usr/share/myosi/just/` (base modules `00-update.just`, `10-extensions.just`, `25-network.just`, `40-install.just`) and any sysext-provided modules (e.g. `50-virt.just`) at every invocation, emitting a transient justfile in `/run/myosi/`. Sysexts can add their own operator commands without the base image knowing about them. Run `myosi --list` to see what's currently available.
+The wrapper scans `/usr/share/myosi/just/` (base modules `00-update.just`, `10-extensions.just`, `25-network.just`, `40-install.just`) and any sysext-provided `*.just` modules at every invocation, emitting a transient justfile in `/run/myosi/`. Sysexts can add their own operator commands without the base image knowing about them. Run `myosi --list` to see what's currently available.
 
 ```bash
 sudo myosi extension-enable   NAME [VERSION]   # enable a sysext feature
