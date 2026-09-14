@@ -9,5 +9,4 @@ STAGE="${1:-final}"
 [ "$STAGE" = "final" ] || exit 0
 
 export NVIDIA_BRANCH=580xx
-export NVIDIA_BUILD_OPTIONAL=1
 source "${SRCDIR}/mkosi.shared/nvidia-build.sh"
