@@ -196,8 +196,9 @@ jobs:
         # set — a release missing any shipped feature's .raw would
         # silently block updates on every host that enabled it. A zfs
         # build failure (upstream lagging a kernel bump) therefore
-        # fails the release loudly; bump ZFS_VERSION or ship without a
-        # new tag.
+        # fails the release loudly; zfs-build.sh already picks the newest
+        # OpenZFS supporting the kernel, so wait for upstream or ship
+        # without a new tag.
         run: |
           cat > mkosi.local.conf <<EOF
           [Build]
