@@ -7,13 +7,8 @@
 # empty stub so CI ships the rest of the release and deployed hosts
 # keep their last-good zfs sysext via version precedence.
 
-# Bump on new OpenZFS stable; don't bump past the Linux-Maximum
-# declared in upstream's META for our kernel.
-ZFS_VERSION="${ZFS_VERSION:-2.4.2}"
-
 KVER=$(ls "$BUILDROOT/usr/lib/modules/" 2>/dev/null | head -1)
 [ -n "$KVER" ] || { echo "ERROR: no kernel under $BUILDROOT/usr/lib/modules/" >&2; exit 1; }
-echo "Building zfs sysext: zfs=$ZFS_VERSION kver=$KVER"
 
 ZFS_BUILD_OPTIONAL="${ZFS_BUILD_OPTIONAL:-0}"
 ZFS_BUILD_BAILOUT=0
@@ -28,6 +23,43 @@ bailout_if_optional() {
     echo "ERROR: zfs build failed at $context (exit $status); set ZFS_BUILD_OPTIONAL=1 to soft-skip" >&2
     exit "$status"
 }
+
+# Newest stable OpenZFS whose META Linux-Minimum..Linux-Maximum covers
+# the kernel's major.minor. Only the latest patch of each series is a
+# candidate — within a series the newest one has the widest range.
+# X.Y.99 tags are development snapshots of master, not releases.
+resolve_zfs_version() {
+    local kver=$1 series tags tag meta min max
+    series=$(grep -oE '^[0-9]+\.[0-9]+' <<<"$kver")
+    tags=$(git ls-remote --tags --refs https://github.com/openzfs/zfs.git 'zfs-*' \
+        | grep -oE 'zfs-[0-9]+\.[0-9]+\.[0-9]+$' | grep -vE '\.99$' \
+        | sort -rV | awk -F. '!seen[$1 FS $2]++') || return 1
+    for tag in $tags; do
+        meta=$(curl -fsSL --retry 3 --connect-timeout 30 \
+            "https://raw.githubusercontent.com/openzfs/zfs/${tag}/META") || return 1
+        min=$(sed -n 's/^Linux-Minimum:[[:space:]]*//p' <<<"$meta")
+        max=$(sed -n 's/^Linux-Maximum:[[:space:]]*//p' <<<"$meta")
+        if printf '%s\n' "$min" "$series" "$max" | sort -V -C; then
+            printf '%s\n' "${tag#zfs-}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ZFS_VERSION pins a release and skips the lookup.
+if [ -z "${ZFS_VERSION:-}" ]; then
+    set +e
+    ZFS_VERSION=$(resolve_zfs_version "$KVER")
+    RESOLVE_STATUS=$?
+    set -e
+    if [ "$RESOLVE_STATUS" -ne 0 ]; then
+        echo "No stable OpenZFS release declares support for kernel $KVER (or GitHub was unreachable)" >&2
+        ZFS_VERSION=none
+        bailout_if_optional "version resolve" "$RESOLVE_STATUS"
+    fi
+fi
+echo "Building zfs sysext: zfs=$ZFS_VERSION kver=$KVER"
 
 # 1. Build deps — matches OpenZFS's documented Fedora set so
 #    ./configure enables every feature instead of silently disabling.
