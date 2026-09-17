@@ -9,24 +9,69 @@ set -euo pipefail
 # trees are all covered by base's selinux-policy-targeted, and
 # sysext_finalize bakes the xattrs via mkfs.erofs --file-contexts.
 
+# Fedora ships a handful of /usr paths as alternatives symlinks into
+# /etc/alternatives/, and strip_to_sysext_layout deletes /etc from every
+# sysext — so on a merged host each one dangles. /usr/bin/ld is the
+# load-bearing case: gcc then cannot link anything, failing with
+# "collect2: fatal error: cannot find 'ld'". Verified by installing this
+# package set, removing /etc, and watching a hello-world fail to link.
+# This package set also brings soelim (groff) and libnssckbi.so (p11-kit)
+# in the same shape, hence the loop rather than a special case for ld.
+#
+# The absolute target is correct here: it resolves through the merged
+# /usr on the host, which is where the real binary lives.
+while IFS= read -r link; do
+    alt=$(readlink "$link")
+    target=$(readlink "$BUILDROOT$alt" 2>/dev/null || true)
+    if [ -n "$target" ] && [ -e "$BUILDROOT$target" ]; then
+        ln -sfn "$target" "$link"
+        echo "devel: repointed ${link#"$BUILDROOT"} -> $target"
+        continue
+    fi
+    # No target in the payload. Under /usr/share that is expected rather
+    # than wrong — WithDocs=no drops the man pages some of these point at
+    # (groff's soelim.1.gz) — and a dangling doc link is only dead weight,
+    # so drop it. Anywhere else (bin, lib64) it is load-bearing and
+    # shipping it would mean a toolchain that fails on a deployed host.
+    case "${link#"$BUILDROOT"}" in
+        /usr/share/*)
+            rm -f "$link"
+            echo "devel: dropped ${link#"$BUILDROOT"} (no target; WithDocs=no)"
+            ;;
+        *)
+            echo "ERROR: ${link#"$BUILDROOT"} -> ${target:-$alt} has no target" >&2
+            echo "       in the buildroot — the sysext would ship a broken tool." >&2
+            exit 1
+            ;;
+    esac
+done < <(find "$BUILDROOT/usr" -type l -lname '/etc/alternatives/*')
+
+# Anything still reaching out of /usr into /etc would dangle the same
+# way. Fail the build rather than ship it.
+remaining=$(find "$BUILDROOT/usr" -type l \
+    \( -lname '/etc/*' -o -lname '*/../etc/*' \) -printf '  %P -> %l\n')
+if [ -n "$remaining" ]; then
+    echo "ERROR: symlinks from /usr into /etc survive into the sysext," >&2
+    echo "       where /etc is stripped — each would dangle on a host:" >&2
+    printf '%s\n' "$remaining" >&2
+    exit 1
+fi
+
 # The linker resolves -lfoo through the unversioned symlink, so a -devel
 # package that landed without one is a build failure on a deployed host
-# and silence here. Check the two the reproducer actually tripped over.
-for lib in libz.so libssl.so; do
-    if [ ! -e "$BUILDROOT/usr/lib64/$lib" ]; then
-        echo "ERROR: /usr/lib64/$lib missing — the devel sysext would ship" >&2
-        echo "       without a linkable $lib. Check the -devel package set." >&2
+# and silence here. Check the two the reproducer actually tripped over,
+# plus the tools the Rust cc crate and node-gyp invoke by literal name.
+# `ld` is deliberately absent from this list — it is an absolute symlink
+# after the repoint above, and `[ -e ]` would resolve that against the
+# BUILD HOST's root; the loop asserts its target instead.
+for f in usr/lib64/libz.so usr/lib64/libssl.so usr/bin/ar \
+         usr/bin/cc usr/bin/c++ usr/include/stdio.h; do
+    if [ ! -e "$BUILDROOT/$f" ]; then
+        echo "ERROR: /$f missing — the devel sysext would ship a toolchain" >&2
+        echo "       that cannot compile or link. Check the package set." >&2
         exit 1
     fi
 done
-
-# Likewise for libc headers: without these the sysext merges cleanly and
-# then fails on the first #include, which is exactly the failure mode
-# brew's clang already has on this host.
-if [ ! -f "$BUILDROOT/usr/include/stdio.h" ]; then
-    echo "ERROR: /usr/include/stdio.h missing — glibc-devel did not land." >&2
-    exit 1
-fi
 
 sysext_write_extension_release devel
 
