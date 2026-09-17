@@ -37,6 +37,7 @@ mkosi.images/*/initrd
 mkosi.images/base-tree/base-tree/
 mkosi.images/containers/containers/
 mkosi.images/desktop/desktop/
+mkosi.images/devel/devel/
 mkosi.images/virt/virt/
 mkosi.images/nvidia/nvidia/
 mkosi.images/nvidia-580xx/nvidia-580xx/

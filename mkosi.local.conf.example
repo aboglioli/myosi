@@ -4,6 +4,7 @@ WorkspaceDirectory=/var/home/<user>/.cache/mkosi-workspace
 # The standard image set (containers+virt baked, desktop+nvidia
 # sysexts) is declared in the tracked mkosi.conf. Add host extras here:
 # [Config]
+# Dependencies=devel
 # Dependencies=nvidia-580xx
 # Dependencies=zfs
 

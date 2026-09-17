@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+. "${SRCDIR}/mkosi.shared/sysext-build.sh"
+[ "${1:-final}" = "final" ] || exit 0
+
+# No units to activate: a toolchain is invoked by the operator, never
+# started at boot. No SELinux work either — gcc, cmake and the -devel
+# trees are all covered by base's selinux-policy-targeted, and
+# sysext_finalize bakes the xattrs via mkfs.erofs --file-contexts.
+
+# The linker resolves -lfoo through the unversioned symlink, so a -devel
+# package that landed without one is a build failure on a deployed host
+# and silence here. Check the two the reproducer actually tripped over.
+for lib in libz.so libssl.so; do
+    if [ ! -e "$BUILDROOT/usr/lib64/$lib" ]; then
+        echo "ERROR: /usr/lib64/$lib missing — the devel sysext would ship" >&2
+        echo "       without a linkable $lib. Check the -devel package set." >&2
+        exit 1
+    fi
+done
+
+# Likewise for libc headers: without these the sysext merges cleanly and
+# then fails on the first #include, which is exactly the failure mode
+# brew's clang already has on this host.
+if [ ! -f "$BUILDROOT/usr/include/stdio.h" ]; then
+    echo "ERROR: /usr/include/stdio.h missing — glibc-devel did not land." >&2
+    exit 1
+fi
+
+sysext_write_extension_release devel
+
+sysext_finalize "$@"

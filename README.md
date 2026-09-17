@@ -83,6 +83,7 @@ Slot sizes are pinned (`SizeMinBytes=SizeMaxBytes`) so systemd-repart's build an
 | `virt_VERSION_ARCH.raw` | Sysext: libvirt, qemu, vfio, virt-manager |
 | `nvidia_VERSION_ARCH.raw` | Sysext: NVIDIA `current` (595.x open kernel modules, Turing+ — RTX 16xx/20xx/30xx/40xx/50xx). All `nvidia*.ko` signed with `boot.key`. |
 | `nvidia-580xx_VERSION_ARCH.raw` | Sysext: NVIDIA `580xx` legacy proprietary modules (Maxwell / Pascal / Volta — GTX 9xx/10xx, Titan V). All `nvidia*.ko` signed with `boot.key`. |
+| `devel_VERSION_ARCH.raw` | Sysext: native build toolchain — gcc, gcc-c++, binutils, glibc-devel, make, cmake, ninja, autotools, plus the `-devel` packages (headers + unversioned `*.so` symlinks) for the libraries native builds usually link: zlib, openssl, zstd, lz4, curl, sasl, sqlite, libffi, systemd. No language runtimes — those are mise's job. |
 | `zfs_VERSION_ARCH.raw` | Sysext: OpenZFS (`zfs-2.4.2` today) — `zfs.ko` + `spl.ko` signed with `boot.key`, plus userspace (`zfs`, `zpool`, `zed`, libraries, `zfs-dracut`, `python3-pyzfs`). Built from the upstream tarball, no RPMFusion / zfsonlinux.org repo dependency. |
 
 Each `*_VERSION_ARCH.raw` sysext carries verity + signature partitions. Every kernel module shipped in those sysexts is signed against `boot.key` so `module.sig_enforce=1` in the UKI cmdline accepts them when the kernel `.platform` keyring has `boot.crt` enrolled (UEFI db on qemu, MOK on hardware).
@@ -104,6 +105,7 @@ myosi/
 │   ├── desktop/             # Niri sysext
 │   ├── virt/                # libvirt/qemu/vfio sysext
 │   ├── containers/          # podman/distrobox/compose/skopeo/incus sysext
+│   ├── devel/               # native build toolchain sysext (gcc, cmake, -devel)
 │   ├── nvidia/              # 595.x driver sysext (Turing+, open kmod)
 │   ├── nvidia-580xx/        # 580.x driver sysext (Pascal/Maxwell/Volta, proprietary)
 │   └── zfs/                 # OpenZFS sysext (built from upstream tarball)
@@ -1547,6 +1549,7 @@ Enable the features this host needs:
 sudo myosi extension-enable containers     # podman, distrobox, skopeo, incus
 sudo myosi extension-enable virt           # libvirt, qemu, vfio, virt-manager
 sudo myosi extension-enable desktop        # niri, terminals, waybar, pipewire, mesa
+sudo myosi extension-enable devel          # gcc, binutils, make, cmake, common -devel
 sudo myosi extension-enable zfs            # OpenZFS module + userspace
 ```
 
@@ -3462,6 +3465,13 @@ Deployed hosts don't have `just`. They don't have the repo. Operator commands th
 
 **Why no Nix or Homebrew preinstalled in the base?**
 Intentional. `myosi` is an atomic, signed OS — installing arbitrary user-space package managers into the image undermines that. Dev tools live in a distrobox dev container with Nix + Homebrew + Brewfile-managed CLIs. The base ships the minimum for a functional host (fish, neovim, ripgrep, fzf, etc.). Heavier dev workflows enter distrobox.
+
+**Why is the build toolchain a sysext and not base packages?**
+Because "add a C compiler" turns out not to be the actual requirement, and satisfying it in the base does not bound. What the base is missing is the whole *devel* half of the distribution: `/usr/include` carries three entries and no libc headers, `/usr/lib64/pkgconfig` is empty, no library ships its unversioned `*.so` symlink, and `binutils`, `make` and `cmake` are absent. A real native build — a Rust crate with a `-sys` dependency, say — trips over all of those, and typically over `ar` and a missing `libz.so` well before it needs a compiler at all. Adding `gcc` pulls `binutils` + `glibc-devel` and fixes two of them; it does nothing for `cmake`, `make`, or the `-devel` package of whichever library the next crate links. That tail has no end, and everything in it would be verity-baked into every host in the fleet, including the ones that will never compile anything.
+
+A sysext is the shape that already exists for exactly this: opt-in per host (`myosi extension-enable devel`), signed and versioned in lockstep with the image, and free for hosts that skip it. Note that `devel` sorts above `desktop` in the sysext layer order, so a `-devel` package that dragged in Fedora's codec-crippled ffmpeg would shadow the desktop sysext's RPM Fusion build — `swap_buildroot_ffmpeg_free` in `sysext_finalize` already catches that and fails the build. See [the codec stack](#the-codec-stack-full-ffmpeg-and-why-it-needs-guarding).
+
+The narrower case — nvim-treesitter shelling out to a literal `cc` to build parsers — does not need this sysext and never did. `zig cc` covers it, because zig bundles its own libc headers and linker in one userspace tarball; that is what `myenv`'s `bin/cc` wraps. Distrobox remains the answer for anything wanting a full `dnf` at hand.
 
 ---
 

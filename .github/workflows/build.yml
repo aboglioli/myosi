@@ -211,6 +211,7 @@ jobs:
           [Config]
           Dependencies=containers
           Dependencies=virt
+          Dependencies=devel
           Dependencies=nvidia-580xx
           Dependencies=zfs
           EOF
