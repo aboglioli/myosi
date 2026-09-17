@@ -46,13 +46,20 @@ while IFS= read -r link; do
     esac
 done < <(find "$BUILDROOT/usr" -type l -lname '/etc/alternatives/*')
 
-# Anything still reaching out of /usr into /etc would dangle the same
-# way. Fail the build rather than ship it.
-remaining=$(find "$BUILDROOT/usr" -type l \
-    \( -lname '/etc/*' -o -lname '*/../etc/*' \) -printf '  %P -> %l\n')
+# Postcondition of the loop above: nothing may still route through
+# /etc/alternatives/. Scoped to that directory ON PURPOSE. A /usr symlink
+# into /etc is not broken in general — systemd's environment.d points at
+# /etc/environment, containers-common's RHEL secrets dangle by design on
+# Fedora, xml-common's catalog resolves only where docbook is configured —
+# and all of those are equally true of the base image. What makes the
+# alternatives case different is that /etc/alternatives/<name> is created
+# ONLY by the package install inside this buildroot, so discarding this
+# /etc is what orphans it; nothing on the host recreates it.
+remaining=$(find "$BUILDROOT/usr" -type l -lname '/etc/alternatives/*' \
+    -printf '  %P -> %l\n')
 if [ -n "$remaining" ]; then
-    echo "ERROR: symlinks from /usr into /etc survive into the sysext," >&2
-    echo "       where /etc is stripped — each would dangle on a host:" >&2
+    echo "ERROR: alternatives symlinks survived the repoint above. /etc is" >&2
+    echo "       stripped from the sysext, so these would dangle on a host:" >&2
     printf '%s\n' "$remaining" >&2
     exit 1
 fi
