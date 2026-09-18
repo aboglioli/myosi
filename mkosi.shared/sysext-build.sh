@@ -127,7 +127,22 @@ swap_buildroot_ffmpeg_free() {
 
     echo "sysext-build: replacing Fedora ffmpeg with RPM Fusion: $(echo "$free" | tr '\n' ' ')"
     stage_sandbox_repos
-    dnf5 --installroot="$buildroot" --nogpgcheck install -y --allowerasing ffmpeg-libs
+    # install_weak_deps=False on EVERY postinst dnf5 call. mkosi's
+    # WithRecommends= (default false) governs only mkosi's OWN dnf pass —
+    # a postinst running dnf5 by hand inherits nothing, so these
+    # transactions were the one place in the build still pulling
+    # Recommends. Measured on the nvidia sysext: 2.7G/672 pkgs -> 2.3G/482,
+    # dragging in samba, tesseract, osinfo-db, poppler, pipewire and a ham
+    # radio codec, none of which anything here links.
+    # Nothing is lost on the ffmpeg side: installed both ways and compared
+    # `ffmpeg -decoders/-encoders/-filters/-muxers/-demuxers/-hwaccels` —
+    # 565 decoders, 235 encoders, 566 filters, 189 muxers, 366 demuxers and
+    # 9 hwaccels identical, h264/hevc/aac/vp9/av1 all present. RPM Fusion
+    # hard-Requires every codec library libavcodec actually links; the weak
+    # deps are optional runtime extras (tesseract for the OCR filter,
+    # libsmbclient for smb://) that no myosi feature uses.
+    dnf5 --installroot="$buildroot" --nogpgcheck install -y --allowerasing \
+        --setopt=install_weak_deps=False ffmpeg-libs
 
     local left
     left=$(chroot "$buildroot" rpm -qa --queryformat '%{NAME}\n' 2>/dev/null \

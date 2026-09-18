@@ -52,13 +52,32 @@ echo "Building nvidia${PKG_SUFFIX} sysext: branch=$NVIDIA_BRANCH kver=$KVER"
 # stage the repos; /etc is stripped before sealing, nothing leaks.
 stage_sandbox_repos
 
+# install_weak_deps=False: see the note in sysext-build.sh's
+# swap_buildroot_ffmpeg_free. Worth 2.7G/672 pkgs -> 2.3G/482 here, which
+# is where most of this sysext's non-NVIDIA payload came from.
+#
+# -power is listed EXPLICITLY because it arrives only as a Recommends and
+# is not optional for us: it ships nvidia-suspend/resume/hibernate.service
+# plus the nvidia-suspend-nofreeze.conf drop-ins on systemd-suspend,
+# -hibernate, -hybrid-sleep and -suspend-then-hibernate. Those are the
+# helpers that actually save and restore VRAM, and step 6a below sets
+# NVreg_PreserveVideoMemoryAllocations=1, which tells the driver to expect
+# them. Dropping it with the rest of the weak deps would leave that option
+# set with nothing implementing it — a suspend/resume regression on every
+# laptop with a dGPU, and invisible at build time.
+#
+# mesa-vulkan-drivers is deliberately NOT re-added: it is the Intel/AMD/
+# panfrost/nouveau ICD set, the desktop profile lists it explicitly, and a
+# host running nvidia without desktop has no use for it.
 dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y \
+    --setopt=install_weak_deps=False \
     akmods gcc gcc-c++ make rpm-build kmod \
     "kernel-devel-${KVER}" \
     "akmod-nvidia${PKG_SUFFIX}" \
     "xorg-x11-drv-nvidia${PKG_SUFFIX}" \
     "xorg-x11-drv-nvidia${PKG_SUFFIX}-libs" \
     "xorg-x11-drv-nvidia${PKG_SUFFIX}-cuda" \
+    "xorg-x11-drv-nvidia${PKG_SUFFIX}-power" \
     nvidia-persistenced \
     nvidia-modprobe \
     libva-nvidia-driver \
@@ -71,6 +90,7 @@ mkdir -p "$BUILDROOT/etc/rpm"
 printf '%%_pkgverify_level none\n' > "$BUILDROOT/etc/rpm/macros.verify"
 dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y \
     --setopt=tsflags=nocrypto \
+    --setopt=install_weak_deps=False \
     nvidia-container-toolkit
 rm -f "$BUILDROOT/etc/rpm/macros.verify"
 
@@ -107,7 +127,8 @@ KMOD_RPM=$(find "$BUILDDIR_ABS/RPMS" -name "kmod-${KMOD_NAME}-*.rpm" -not -name 
 echo "Installing built kmod: ${KMOD_RPM#$BUILDROOT}"
 # dnf5 --installroot resolves package paths from the HOST filesystem —
 # pass the full host-visible path, no $BUILDROOT strip.
-dnf5 --installroot="$BUILDROOT" install -y "$KMOD_RPM"
+dnf5 --installroot="$BUILDROOT" install -y \
+    --setopt=install_weak_deps=False "$KMOD_RPM"
 
 # 4. depmod inside the buildroot.
 kmod_exec depmod -a "$KVER"

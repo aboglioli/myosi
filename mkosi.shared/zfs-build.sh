@@ -65,7 +65,12 @@ echo "Building zfs sysext: zfs=$ZFS_VERSION kver=$KVER"
 #    ./configure enables every feature instead of silently disabling.
 #    kernel-devel-${KVER} is what the later cross-kernel rebuild links against.
 set +e
+# install_weak_deps=False: see sysext-build.sh's swap_buildroot_ffmpeg_free.
+# Build-time only — every package here is removed again in step 8 — but the
+# Recommends they drag in are NOT all removed with them, so they would have
+# been sealed into the sysext.
 dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y \
+    --setopt=install_weak_deps=False \
     akmods gcc gcc-c++ make rpm-build kmod tar gzip \
     autoconf automake libtool \
     "kernel-devel-${KVER}" \
@@ -197,7 +202,9 @@ fi
 
 echo "Installing runtime RPMs:"
 echo "$RUNTIME_RPMS" | sed "s|$BUILDROOT||"
-dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y $RUNTIME_RPMS
+# shellcheck disable=SC2086
+dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y \
+    --setopt=install_weak_deps=False $RUNTIME_RPMS
 
 # 6. depmod inside the buildroot.
 kmod_exec depmod -a "$KVER"

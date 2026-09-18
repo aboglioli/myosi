@@ -65,6 +65,33 @@ jobs:
           printf '  %s\n' "${files[@]}"
           # No `|| true`: this gate used to swallow every finding.
           shellcheck -S warning "${files[@]}"
+      - name: Every postinst dnf5 install must disable weak deps
+        # mkosi's WithRecommends= (default false) covers only mkosi's OWN
+        # dnf pass. A postinst running dnf5 by hand inherits nothing, so
+        # each call needs the flag itself — and every one of them was
+        # missing it, which is where ~400 MB of samba/tesseract/osinfo/
+        # poppler ended up inside the nvidia sysext. Mechanical check
+        # because the omission is invisible in review and only shows up
+        # as an oversized release asset months later.
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            # Join backslash continuations so the flag is seen wherever it
+            # sits in a multi-line command.
+            joined=$(sed -e ':a' -e '/\\$/{N;s/\\\n/ /;ta}' "$f")
+            while IFS= read -r line; do
+              stripped=${line#"${line%%[![:space:]]*}"}
+              case "$stripped" in \#*) continue ;; esac
+              case "$stripped" in *dnf5*install*) : ;; *) continue ;; esac
+              case "$stripped" in *" remove "*) continue ;; esac
+              case "$stripped" in
+                *install_weak_deps=False*) ;;
+                *) echo "::error file=$f::dnf5 install without --setopt=install_weak_deps=False: $(echo "$stripped" | cut -c1-90)"; fail=1 ;;
+              esac
+            done <<< "$joined"
+          done < <(grep -rl 'dnf5' --include='*.sh' --include='mkosi.postinst' . | grep -v '^\./\.git')
+          [ "$fail" -eq 0 ] && echo "all dnf5 install calls carry the weak-dep guard"
+          exit $fail
       - name: mkosi summary (parse check)
         env:
           # Validate doesn't have access to release secrets; let the

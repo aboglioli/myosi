@@ -10,7 +10,11 @@ set -euo pipefail
 # manual dnf doesn't inherit SandboxTrees= repos, so stage them first;
 # /etc is stripped before sealing, no repo file leaks into the sysext.
 stage_sandbox_repos
-dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y --allowerasing ffmpeg
+# install_weak_deps=False: see sysext-build.sh's swap_buildroot_ffmpeg_free
+# for the measurement — no decoder, encoder, filter, muxer, demuxer or
+# hwaccel is lost, only optional extras nothing here links.
+dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y --allowerasing \
+    --setopt=install_weak_deps=False ffmpeg
 
 # ffmpeg-libs exists only in RPM Fusion — Fedora's split is ffmpeg-free
 # + libav*-free — so its presence is proof the swap resolved against
