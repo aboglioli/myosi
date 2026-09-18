@@ -773,6 +773,45 @@ on this layout. Generic summary so you know what to look for:
   exit code 1 — the steady-state data partition has no upper size
   cap, so repart always exits 1 with "can't fit", which is fine.
 
+### A postinst's `dnf5` does not inherit mkosi's settings
+
+`WithRecommends=` (default false) applies to **mkosi's own** dnf pass. A
+`mkosi.postinst` that runs `dnf5 --installroot=` by hand inherits none of
+it — not the repo set (hence `stage_sandbox_repos`), and not the weak-dep
+policy. Every such call therefore needs
+`--setopt=install_weak_deps=False` spelled out, and every one of them was
+missing it.
+
+The cost was concentrated in the nvidia sysext, whose entire package set
+arrives through a manual `dnf5`: **2.7 G / 672 packages → 2.3 G / 483**.
+What the Recommends were dragging in is the giveaway — `samba-client-libs`,
+`tesseract-libs` with English training data, `osinfo-db`, `poppler`,
+`pipewire`, `intel-mediasdk` and `lpcnetfreedv`, a ham radio codec. None of
+it is linked by anything in that sysext; 45% of its payload was not NVIDIA.
+
+Two things this is **not** allowed to break, both measured rather than
+assumed:
+
+- **Codecs.** RPM Fusion's ffmpeg hard-`Requires` every codec library
+  `libavcodec` links; its Recommends are optional runtime extras (tesseract
+  for the `ocr` filter, libsmbclient for `smb://`). Installed both ways and
+  diffed: 565 decoders, 235 encoders, 566 filters, 189 muxers, 366
+  demuxers and 9 hwaccels **identical**, h264/hevc/aac/vp9/av1 all present.
+- **Suspend on a dGPU laptop.** `xorg-x11-drv-nvidia-power` arrives only as
+  a Recommends, and it ships `nvidia-suspend/resume/hibernate.service` plus
+  the `nvidia-suspend-nofreeze.conf` drop-ins. `50-nvidia.conf` sets
+  `NVreg_PreserveVideoMemoryAllocations=1`, which tells the driver to
+  expect exactly those helpers — dropping them would leave the option set
+  with nothing implementing it. It is now listed explicitly in
+  `nvidia-build.sh`. `mesa-vulkan-drivers` is deliberately *not* re-added:
+  the desktop profile lists it, and an nvidia-only host has no use for the
+  Intel/AMD/panfrost/nouveau ICDs.
+
+A `validate` job step enforces this mechanically — it joins backslash
+continuations and fails any `dnf5 … install` without the flag. The omission
+is invisible in review and otherwise only surfaces months later as a
+release asset that no longer fits under GitHub's 2 GiB per-file limit.
+
 ### Recent fixes (generic summary)
 
 The above paths and ordering rules were each settled by a specific
