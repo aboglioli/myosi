@@ -1,0 +1,44 @@
+# nvidia-container-toolkit config. Ships in the BASE image, not in the nvidia
+# sysexts, because a sysext merges /usr only — the package installs its binaries
+# under /usr (where the sysext delivers them) and its config under /etc (where
+# the sysext cannot reach), so without this file the prestart hook exits 1 and
+# every GPU container fails with "error executing hook ... (exit code: 1)".
+#
+# Inert on hosts with no nvidia sysext: nothing reads it, and podman ignores a
+# hook whose binary is absent (verified).
+
+disable-require = false
+supported-driver-capabilities = "compat32,compute,display,graphics,ngx,utility,video"
+
+[nvidia-container-cli]
+environment = []
+# Fedora's path. The upstream default is Debian's /sbin/ldconfig.real.
+ldconfig = "@/sbin/ldconfig"
+load-kmods = true
+# The cgroup step fails on cgroup v2 here and takes the hook's exit code with
+# it. Nothing is lost: podman programs the device cgroup for the devices a
+# container actually asks for, and rootless has no device cgroup at all.
+no-cgroups = true
+
+[nvidia-container-runtime]
+log-level = "info"
+mode = "auto"
+runtimes = ["runc", "crun"]
+
+[nvidia-container-runtime.modes.cdi]
+annotation-prefixes = ["cdi.k8s.io/"]
+default-kind = "nvidia.com/gpu"
+spec-dirs = ["/etc/cdi", "/var/run/cdi"]
+
+[nvidia-container-runtime.modes.csv]
+mount-spec-path = "/etc/nvidia-container-runtime/host-files-for-container.d"
+
+[nvidia-container-runtime.modes.legacy]
+cuda-compat-mode = "ldconfig"
+
+[nvidia-container-runtime-hook]
+path = "nvidia-container-runtime-hook"
+skip-mode-detection = false
+
+[nvidia-ctk]
+path = "nvidia-ctk"

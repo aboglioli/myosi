@@ -83,6 +83,19 @@ Slot sizes are pinned (`SizeMinBytes=SizeMaxBytes`) so systemd-repart's build an
 | `virt_VERSION_ARCH.raw` | Sysext: libvirt, qemu, vfio, virt-manager |
 | `nvidia_VERSION_ARCH.raw` | Sysext: NVIDIA `current` (595.x open kernel modules, Turing+ — RTX 16xx/20xx/30xx/40xx/50xx). All `nvidia*.ko` signed with `boot.key`. |
 | `nvidia-580xx_VERSION_ARCH.raw` | Sysext: NVIDIA `580xx` legacy proprietary modules (Maxwell / Pascal / Volta — GTX 9xx/10xx, Titan V). All `nvidia*.ko` signed with `boot.key`. |
+
+Both nvidia sysexts carry `nvidia-container-toolkit`, but the pieces that make
+GPUs reachable **from containers** ship in the base image's `/etc` instead —
+`etc/containers/containers.conf.d/10-oci-hooks.conf`,
+`etc/containers/oci/hooks.d/oci-nvidia-hook.json` and
+`etc/nvidia-container-runtime/config.toml`. A sysext merges `/usr` and never
+`/etc`, so a package that installs binaries under `/usr` and its config under
+`/etc` arrives half-installed: here that left the prestart hook unregistered and
+unconfigured, and every GPU container died with `error executing hook
+/usr/bin/nvidia-container-runtime-hook (exit code: 1)`. The three files are
+inert on hosts without an nvidia sysext — podman ignores a hook whose binary is
+missing, and the hook itself is a no-op unless a container sets
+`NVIDIA_VISIBLE_DEVICES`.
 | `devel_VERSION_ARCH.raw` | Sysext: native build toolchain — gcc, gcc-c++, binutils, glibc-devel, make, cmake, ninja, autotools, plus the `-devel` packages (headers + unversioned `*.so` symlinks) for the libraries native builds usually link: zlib, openssl, zstd, lz4, curl, sasl, sqlite, libffi, systemd. No language runtimes — those are mise's job. |
 | `zfs_VERSION_ARCH.raw` | Sysext: OpenZFS (`zfs-2.4.2` today) — `zfs.ko` + `spl.ko` signed with `boot.key`, plus userspace (`zfs`, `zpool`, `zed`, libraries, `zfs-dracut`, `python3-pyzfs`). Built from the upstream tarball, no RPMFusion / zfsonlinux.org repo dependency. |
 
