@@ -740,6 +740,27 @@ nvidia drop-in removed the only brake and turned a visible failure into
 27k silent restarts. Need headroom for a real burst? Raise the burst,
 keep the window bounded.
 
+`bluetooth.service` needs more than a `Wants=`: D-Bus activates it as
+`dbus-org.bluez.service`, a name that only exists through `[Install] Alias=`.
+The desktop profile ships that alias as a symlink, and wants the service from
+both `multi-user.target` (adapters present at boot) and `bluetooth.target`
+(adapters that appear later).
+
+The NVIDIA sleep helpers hang off `systemd-suspend`, `-hibernate` and
+`-suspend-then-hibernate` rather than a target, so each sysext carries a drop-in
+on those services. On `nvidia` (615) the driver saves VRAM through kernel suspend
+notifiers and the helpers skip themselves via `ExecCondition=`. `nvidia-580xx`
+(580) has no such notifiers, so `NVreg_PreserveVideoMemoryAllocations=1` depends
+on them.
+
+### PAM services from a sysext live in `/usr/lib/pam.d`
+
+A package's `/etc/pam.d/<service>` is stripped with the rest of `/etc`, and
+PAM answers a missing service with `other`, which is `pam_deny` here. Nothing
+fails at build or boot: `swaylock` started normally and then rejected every
+password without even asking for one. libpam also reads `/usr/lib/pam.d`, so
+the desktop profile ships its service there.
+
 ### Service hygiene
 
 A handful of small drop-ins exist because upstream defaults misfire
