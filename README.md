@@ -746,6 +746,13 @@ The desktop profile ships that alias as a symlink, and wants the service from
 both `multi-user.target` (adapters present at boot) and `bluetooth.target`
 (adapters that appear later).
 
+The NVIDIA sleep helpers hang off `systemd-suspend`, `-hibernate` and
+`-suspend-then-hibernate` rather than a target, so each sysext carries a drop-in
+on those services. On `nvidia` (615) the driver saves VRAM through kernel suspend
+notifiers and the helpers skip themselves via `ExecCondition=`. `nvidia-580xx`
+(580) has no such notifiers, so `NVreg_PreserveVideoMemoryAllocations=1` depends
+on them.
+
 ### PAM services from a sysext live in `/usr/lib/pam.d`
 
 A package's `/etc/pam.d/<service>` is stripped with the rest of `/etc`, and
