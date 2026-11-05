@@ -103,7 +103,7 @@ done
 . "${SRCDIR}/mkosi.shared/kmod-build.sh"
 
 # 3. rpmbuild the kmod inside the buildroot.
-BUILDDIR_REL=/tmp/nvidia-build
+BUILDDIR_REL=$SYSEXT_BUILD_DIR_REL/nvidia
 BUILDDIR_ABS="$BUILDROOT$BUILDDIR_REL"
 mkdir -p "$BUILDDIR_ABS"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 

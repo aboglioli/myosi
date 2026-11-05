@@ -69,6 +69,13 @@ sysext_remove() {
     mkosi-remove "$@"
 }
 
+# Buildroot-relative scratch dir for anything sysext_install must read back,
+# such as locally built RPMs. Never /tmp, /run or /var/tmp: mkosi's
+# package-manager sandbox mounts a fresh tmpfs over the first two and the
+# sandbox's own /var/tmp over the third, so dnf sees an empty directory there
+# ("Failed to access RPM", 2026.11.05.01). strip_to_sysext_layout drops it.
+SYSEXT_BUILD_DIR_REL=/var/lib/myosi-sysext-build
+
 # Unit activation in sysexts/profiles is DECLARATIVE only: ship static
 # .wants/ symlinks under mkosi.extra/usr/lib/systemd/. Preset-shipped
 # /etc symlinks die in strip_to_sysext_layout; /usr/lib ones survive,

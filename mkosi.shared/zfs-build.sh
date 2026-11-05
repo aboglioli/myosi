@@ -86,7 +86,7 @@ if [ "$DEPS_STATUS" -ne 0 ]; then
 fi
 
 # 2. Fetch upstream tarball into the buildroot.
-ZFS_SRC_REL=/tmp/zfs-src
+ZFS_SRC_REL=$SYSEXT_BUILD_DIR_REL/zfs
 ZFS_SRC_ABS="$BUILDROOT$ZFS_SRC_REL"
 if [ "$ZFS_BUILD_BAILOUT" -eq 0 ]; then
     mkdir -p "$ZFS_SRC_ABS"

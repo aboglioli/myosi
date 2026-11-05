@@ -824,6 +824,11 @@ the sandbox repos and dnf.conf, `WithRecommends=` and `WithDocs=`. They add
 Every sysext postinst uses them; extra dnf options still pass through
 (`--allowerasing`, `--setopt=tsflags=nocrypto`).
 
+Locally built RPMs go under `$SYSEXT_BUILD_DIR_REL`, never `/tmp`, `/run` or
+`/var/tmp`. mkosi's dnf sandbox mounts over those three inside `/buildroot`, so
+a path there is empty to dnf. 2026.11.05.01 built the nvidia kmod in
+`/tmp/nvidia-build` and then failed with `Failed to access RPM`.
+
 Two things this is **not** allowed to break, both measured rather than
 assumed:
 
