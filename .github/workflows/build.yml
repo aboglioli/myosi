@@ -65,33 +65,25 @@ jobs:
           printf '  %s\n' "${files[@]}"
           # No `|| true`: this gate used to swallow every finding.
           shellcheck -S warning "${files[@]}"
-      - name: Every postinst dnf5 install must disable weak deps
-        # mkosi's WithRecommends= (default false) covers only mkosi's OWN
-        # dnf pass. A postinst running dnf5 by hand inherits nothing, so
-        # each call needs the flag itself — and every one of them was
-        # missing it, which is where ~400 MB of samba/tesseract/osinfo/
-        # poppler ended up inside the nvidia sysext. Mechanical check
-        # because the omission is invisible in review and only shows up
-        # as an oversized release asset months later.
+      - name: Postinst package operations go through sysext_install
+        # A raw `dnf5 --installroot=` in a postinst fetches its own repo
+        # metadata, so it can resolve against a different mirror state than
+        # base-tree did (2026.11.02.01: no kernel-devel for the image's
+        # kernel), and it ignores WithRecommends= (~400 MB of Recommends once
+        # sealed into the nvidia sysext). sysext_install/sysext_remove wrap
+        # mkosi-install/mkosi-remove, which reuse mkosi's single metadata
+        # sync and config. Mechanical check: the mistake is invisible in
+        # review and only surfaces as a broken or oversized release.
         run: |
-          fail=0
-          while IFS= read -r f; do
-            # Join backslash continuations so the flag is seen wherever it
-            # sits in a multi-line command.
-            joined=$(sed -e ':a' -e '/\\$/{N;s/\\\n/ /;ta}' "$f")
-            while IFS= read -r line; do
-              stripped=${line#"${line%%[![:space:]]*}"}
-              case "$stripped" in \#*) continue ;; esac
-              case "$stripped" in *dnf5*install*) : ;; *) continue ;; esac
-              case "$stripped" in *" remove "*) continue ;; esac
-              case "$stripped" in
-                *install_weak_deps=False*) ;;
-                *) echo "::error file=$f::dnf5 install without --setopt=install_weak_deps=False: $(echo "$stripped" | cut -c1-90)"; fail=1 ;;
-              esac
-            done <<< "$joined"
-          done < <(grep -rl 'dnf5' --include='*.sh' --include='mkosi.postinst' . | grep -v '^\./\.git')
-          [ "$fail" -eq 0 ] && echo "all dnf5 install calls carry the weak-dep guard"
-          exit $fail
+          pattern='(^|[^[:alnum:]_./-])dnf5?[[:space:]]+([^[:space:]]+[[:space:]]+)*(install|remove|upgrade|reinstall|swap|distro-sync)([[:space:]]|$)'
+          if hits=$(grep -rnE "$pattern" mkosi.postinst mkosi.finalize mkosi.shared mkosi.images \
+              | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#'); then
+            printf '%s\n' "$hits" | while IFS= read -r hit; do
+              echo "::error file=${hit%%:*}::raw dnf package operation; use sysext_install/sysext_remove: ${hit#*:}"
+            done
+            exit 1
+          fi
+          echo "no raw dnf package operations in build scripts"
       - name: mkosi summary (parse check)
         env:
           # Validate doesn't have access to release secrets; let the

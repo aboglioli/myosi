@@ -773,21 +773,35 @@ on this layout. Generic summary so you know what to look for:
   exit code 1 — the steady-state data partition has no upper size
   cap, so repart always exits 1 with "can't fit", which is fine.
 
-### A postinst's `dnf5` does not inherit mkosi's settings
+### Postinst package operations go through `sysext_install`
 
-`WithRecommends=` (default false) applies to **mkosi's own** dnf pass. A
-`mkosi.postinst` that runs `dnf5 --installroot=` by hand inherits none of
-it — not the repo set (hence `stage_sandbox_repos`), and not the weak-dep
-policy. Every such call therefore needs
-`--setopt=install_weak_deps=False` spelled out, and every one of them was
-missing it.
+A `mkosi.postinst` that ran `dnf5 --installroot=` by hand inherited none of
+mkosi's settings, and every gap turned into a release problem:
 
-The cost was concentrated in the nvidia sysext, whose entire package set
-arrives through a manual `dnf5`: **2.7 G / 672 packages → 2.3 G / 483**.
-What the Recommends were dragging in is the giveaway — `samba-client-libs`,
-`tesseract-libs` with English training data, `osinfo-db`, `poppler`,
-`pipewire`, `intel-mediasdk` and `lpcnetfreedv`, a ham radio codec. None of
-it is linked by anything in that sysext; 45% of its payload was not NVIDIA.
+- **Metadata.** mkosi syncs repository metadata **once** per build and every
+  image's own dnf pass reuses that snapshot. A raw `dnf5` fetched its own from
+  whichever mirror the metalink returned, and Fedora's `updates` keeps only the
+  newest kernel. 2026.11.02.01 failed this way: base-tree resolved
+  `kernel-7.2.14`, published five hours earlier, then `nvidia-580xx` landed on
+  a mirror that did not have it yet (`No match for argument:
+  kernel-devel-7.2.14-200.fc44.x86_64`). Any package that must match the base
+  image is exposed to the same skew, not only the kernel.
+- **Weak deps.** `WithRecommends=` (default false) only reached mkosi's own
+  pass. The nvidia sysext's manual installs pulled Recommends:
+  **2.7 G / 672 packages → 2.3 G / 483** once they stopped, dropping
+  `samba-client-libs`, `tesseract-libs`, `osinfo-db`, `poppler`, `pipewire`,
+  `intel-mediasdk` and `lpcnetfreedv`, a ham radio codec, none of it linked by
+  anything in that sysext.
+- **Repos and dnf.conf.** `SandboxTrees=` repos and `mkosi.sandbox`'s
+  `dnf.conf` (retries, timeouts) had to be copied into the buildroot first.
+
+`sysext_install` and `sysext_remove` in `mkosi.shared/sysext-build.sh` wrap
+mkosi's own `mkosi-install` / `mkosi-remove` script helpers, which run mkosi's
+dnf against the buildroot with all of the above: the shared metadata snapshot,
+the sandbox repos and dnf.conf, `WithRecommends=` and `WithDocs=`. They add
+`--nogpgcheck` because the kmod and zfs RPMs are built locally and unsigned.
+Every sysext postinst uses them; extra dnf options still pass through
+(`--allowerasing`, `--setopt=tsflags=nocrypto`).
 
 Two things this is **not** allowed to break, both measured rather than
 assumed:
@@ -807,10 +821,11 @@ assumed:
   the desktop profile lists it, and an nvidia-only host has no use for the
   Intel/AMD/panfrost/nouveau ICDs.
 
-A `validate` job step enforces this mechanically — it joins backslash
-continuations and fails any `dnf5 … install` without the flag. The omission
-is invisible in review and otherwise only surfaces months later as a
-release asset that no longer fits under GitHub's 2 GiB per-file limit.
+A `validate` job step enforces this mechanically: it fails on any `dnf`
+or `dnf5` package operation (`install`, `remove`, `upgrade`, …) in the build
+scripts. The mistake is invisible in review and only surfaces later, as a
+failed release or an asset that no longer fits under GitHub's 2 GiB per-file
+limit.
 
 ### Recent fixes (generic summary)
 

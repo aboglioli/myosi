@@ -47,14 +47,11 @@ echo "Building nvidia${PKG_SUFFIX} sysext: branch=$NVIDIA_BRANCH kver=$KVER"
 
 . "${SRCDIR}/mkosi.shared/sysext-build.sh"
 
-# Build deps + userspace + akmod source. Postinst-run dnf doesn't
-# inherit mkosi's sandbox repo dir (only mkosi's own dnf pass does), so
-# stage the repos; /etc is stripped before sealing, nothing leaks.
-stage_sandbox_repos
-
-# install_weak_deps=False: see the note in sysext-build.sh's
-# swap_buildroot_ffmpeg_free. Worth 2.7G/672 pkgs -> 2.3G/482 here, which
-# is where most of this sysext's non-NVIDIA payload came from.
+# Build deps + userspace + akmod source, through sysext_install (see
+# sysext-build.sh) so kernel-devel resolves against the same metadata
+# snapshot that fixed base-tree's kernel. Weak deps stay off
+# (WithRecommends=): 2.7G/672 pkgs -> 2.3G/482 here, which is where most of
+# this sysext's non-NVIDIA payload came from.
 #
 # -power is listed EXPLICITLY because it arrives only as a Recommends and
 # is not optional for us: it ships nvidia-suspend/resume/hibernate.service
@@ -69,8 +66,7 @@ stage_sandbox_repos
 # mesa-vulkan-drivers is deliberately NOT re-added: it is the Intel/AMD/
 # panfrost/nouveau ICD set, the desktop profile lists it explicitly, and a
 # host running nvidia without desktop has no use for it.
-dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y \
-    --setopt=install_weak_deps=False \
+sysext_install \
     akmods gcc gcc-c++ make rpm-build kmod \
     "kernel-devel-${KVER}" \
     "akmod-nvidia${PKG_SUFFIX}" \
@@ -88,10 +84,7 @@ dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y \
 # transaction only.
 mkdir -p "$BUILDROOT/etc/rpm"
 printf '%%_pkgverify_level none\n' > "$BUILDROOT/etc/rpm/macros.verify"
-dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y \
-    --setopt=tsflags=nocrypto \
-    --setopt=install_weak_deps=False \
-    nvidia-container-toolkit
+sysext_install --setopt=tsflags=nocrypto nvidia-container-toolkit
 rm -f "$BUILDROOT/etc/rpm/macros.verify"
 
 for unit in nvidia-cdi-refresh.service nvidia-cdi-refresh.path; do
@@ -125,10 +118,9 @@ kmod_exec rpmbuild --rebuild \
 KMOD_RPM=$(find "$BUILDDIR_ABS/RPMS" -name "kmod-${KMOD_NAME}-*.rpm" -not -name "*debug*" | head -1)
 [ -n "$KMOD_RPM" ] || { echo "ERROR: built kmod RPM not found" >&2; exit 1; }
 echo "Installing built kmod: ${KMOD_RPM#$BUILDROOT}"
-# dnf5 --installroot resolves package paths from the HOST filesystem —
-# pass the full host-visible path, no $BUILDROOT strip.
-dnf5 --installroot="$BUILDROOT" install -y \
-    --setopt=install_weak_deps=False "$KMOD_RPM"
+# A local path is resolved outside the buildroot — pass the full
+# $BUILDROOT path, no strip.
+sysext_install "$KMOD_RPM"
 
 # 4. depmod inside the buildroot.
 kmod_exec depmod -a "$KVER"
@@ -193,9 +185,9 @@ EOF
 rm -rf "$BUILDDIR_ABS"
 kmod_unmount
 
-dnf5 --installroot="$BUILDROOT" remove -y \
+sysext_remove \
     akmods rpm-build gcc gcc-c++ make \
-    "kernel-devel-${KVER}" 2>/dev/null || true
+    "kernel-devel-${KVER}" "kernel-devel-matched-${KVER}" 2>/dev/null || true
 # rpmfusion-*-release aren't in the remove list — the repo files come
 # from mkosi.sandbox; the release RPMs were never installed.
 
