@@ -51,22 +51,22 @@ strip_to_sysext_layout() {
     rm -f "$buildroot/usr/share/glib-2.0/schemas/gschemas.compiled"
 }
 
-stage_sandbox_repos() {
-    local buildroot="${BUILDROOT:?BUILDROOT must be set by mkosi}"
-    local srcdir="${SRCDIR:?SRCDIR must be set by mkosi}"
-    local repo_dir="$srcdir/mkosi.sandbox/etc/yum.repos.d"
-    local repo_files=("$repo_dir"/*.repo)
+# Every postinst package operation goes through these two, never a raw
+# `dnf5 --installroot=`. mkosi-install/mkosi-remove run mkosi's own dnf
+# against the buildroot with the repository metadata mkosi synced ONCE for
+# the whole build, so a sysext resolves against the exact repo state
+# base-tree was built from. A raw dnf5 fetched fresh metadata from whichever
+# mirror the metalink returned: 2026.11.02.01 failed when nvidia-580xx hit a
+# mirror still missing the kernel-devel matching base-tree's kernel. The
+# wrapper also carries SandboxTrees= repos, mkosi.sandbox's dnf.conf,
+# WithRecommends= and WithDocs=, which a raw call had to restate each time.
+# --nogpgcheck as before: the kmods and zfs RPMs are built locally, unsigned.
+sysext_install() {
+    mkosi-install --nogpgcheck "$@"
+}
 
-    if [ ! -d "$repo_dir" ]; then
-        echo "sysext-build: $repo_dir missing" >&2
-        return 1
-    fi
-    if [ ! -e "${repo_files[0]}" ]; then
-        echo "sysext-build: $repo_dir has no .repo files" >&2
-        return 1
-    fi
-    mkdir -p "$buildroot/etc/yum.repos.d"
-    cp -a "${repo_files[@]}" "$buildroot/etc/yum.repos.d/"
+sysext_remove() {
+    mkosi-remove "$@"
 }
 
 # Unit activation in sysexts/profiles is DECLARATIVE only: ship static
@@ -126,23 +126,15 @@ swap_buildroot_ffmpeg_free() {
     [ -n "$free" ] || return 0
 
     echo "sysext-build: replacing Fedora ffmpeg with RPM Fusion: $(echo "$free" | tr '\n' ' ')"
-    stage_sandbox_repos
-    # install_weak_deps=False on EVERY postinst dnf5 call. mkosi's
-    # WithRecommends= (default false) governs only mkosi's OWN dnf pass —
-    # a postinst running dnf5 by hand inherits nothing, so these
-    # transactions were the one place in the build still pulling
-    # Recommends. Measured on the nvidia sysext: 2.7G/672 pkgs -> 2.3G/482,
-    # dragging in samba, tesseract, osinfo-db, poppler, pipewire and a ham
-    # radio codec, none of which anything here links.
-    # Nothing is lost on the ffmpeg side: installed both ways and compared
+    # Weak deps stay off (WithRecommends=). Nothing is lost on the ffmpeg
+    # side: installed both ways and compared
     # `ffmpeg -decoders/-encoders/-filters/-muxers/-demuxers/-hwaccels` —
     # 565 decoders, 235 encoders, 566 filters, 189 muxers, 366 demuxers and
     # 9 hwaccels identical, h264/hevc/aac/vp9/av1 all present. RPM Fusion
     # hard-Requires every codec library libavcodec actually links; the weak
     # deps are optional runtime extras (tesseract for the OCR filter,
     # libsmbclient for smb://) that no myosi feature uses.
-    dnf5 --installroot="$buildroot" --nogpgcheck install -y --allowerasing \
-        --setopt=install_weak_deps=False ffmpeg-libs
+    sysext_install --allowerasing ffmpeg-libs
 
     local left
     left=$(chroot "$buildroot" rpm -qa --queryformat '%{NAME}\n' 2>/dev/null \
@@ -218,8 +210,8 @@ sysext_write_extension_release() {
 # invoking the `final` stage.
 sysext_finalize() {
     [ "${1:-final}" = "final" ] || exit 0
-    # Before strip_buildroot_dnf: the swap needs the sandbox repos and a
-    # working dnf5 transaction against the buildroot.
+    # Before strip_buildroot_dnf: the swap is a dnf transaction against the
+    # buildroot's rpmdb.
     swap_buildroot_ffmpeg_free
     strip_buildroot_dnf
     stage_sysext_policy

@@ -61,16 +61,16 @@ if [ -z "${ZFS_VERSION:-}" ]; then
 fi
 echo "Building zfs sysext: zfs=$ZFS_VERSION kver=$KVER"
 
+. "${SRCDIR}/mkosi.shared/sysext-build.sh"
+
 # 1. Build deps — matches OpenZFS's documented Fedora set so
 #    ./configure enables every feature instead of silently disabling.
 #    kernel-devel-${KVER} is what the later cross-kernel rebuild links against.
 set +e
-# install_weak_deps=False: see sysext-build.sh's swap_buildroot_ffmpeg_free.
-# Build-time only — every package here is removed again in step 8 — but the
-# Recommends they drag in are NOT all removed with them, so they would have
-# been sealed into the sysext.
-dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y \
-    --setopt=install_weak_deps=False \
+# Weak deps stay off (WithRecommends=). Build-time only — every package here
+# is removed again in step 8 — but Recommends are NOT all removed with them,
+# so they would be sealed into the sysext.
+sysext_install \
     akmods gcc gcc-c++ make rpm-build kmod tar gzip \
     autoconf automake libtool \
     "kernel-devel-${KVER}" \
@@ -203,8 +203,7 @@ fi
 echo "Installing runtime RPMs:"
 echo "$RUNTIME_RPMS" | sed "s|$BUILDROOT||"
 # shellcheck disable=SC2086
-dnf5 --installroot="$BUILDROOT" --nogpgcheck install -y \
-    --setopt=install_weak_deps=False $RUNTIME_RPMS
+sysext_install $RUNTIME_RPMS
 
 # 6. depmod inside the buildroot.
 kmod_exec depmod -a "$KVER"
@@ -216,13 +215,13 @@ kmod_sign_modules zfs -path '*/extra/*' \
     -o -name 'zzstd.ko*' -o -name 'icp.ko*' \)
 
 # 8. Strip build artifacts + dev packages before sealing. Same dance
-#    as nvidia: unmount before dnf5 remove, sweep again after.
+#    as nvidia: unmount before sysext_remove, sweep again after.
 rm -rf "$BUILDROOT$ZFS_SRC_REL"
 kmod_unmount
 
-dnf5 --installroot="$BUILDROOT" remove -y \
+sysext_remove \
     akmods rpm-build gcc gcc-c++ make autoconf automake libtool tar gzip \
-    "kernel-devel-${KVER}" \
+    "kernel-devel-${KVER}" "kernel-devel-matched-${KVER}" \
     zlib-ng-compat-devel libuuid-devel libblkid-devel libudev-devel \
     libtirpc-devel openssl-devel libcurl-devel \
     libaio-devel libattr-devel elfutils-libelf-devel libffi-devel \
@@ -243,7 +242,6 @@ if ! kmod_indexed "extra/zfs/zfs.ko"; then
 fi
 
 # 9. Extension-release: shared envelope + kernel pin.
-. "${SRCDIR}/mkosi.shared/sysext-build.sh"
 sysext_write_extension_release zfs \
     "SYSEXT_KERNEL_RELEASE=${KVER}"
 
