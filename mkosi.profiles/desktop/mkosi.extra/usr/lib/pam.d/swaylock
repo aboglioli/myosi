@@ -1,0 +1,5 @@
+#%PAM-1.0
+# swaylock's RPM puts this in /etc/pam.d, which sysexts don't ship — without
+# this /usr/lib copy PAM falls back to `other` (pam_deny) and no password can
+# ever unlock the screen.
+auth include login

@@ -740,6 +740,14 @@ nvidia drop-in removed the only brake and turned a visible failure into
 27k silent restarts. Need headroom for a real burst? Raise the burst,
 keep the window bounded.
 
+### PAM services from a sysext live in `/usr/lib/pam.d`
+
+A package's `/etc/pam.d/<service>` is stripped with the rest of `/etc`, and
+PAM answers a missing service with `other`, which is `pam_deny` here. Nothing
+fails at build or boot: `swaylock` started normally and then rejected every
+password without even asking for one. libpam also reads `/usr/lib/pam.d`, so
+the desktop profile ships its service there.
+
 ### Service hygiene
 
 A handful of small drop-ins exist because upstream defaults misfire
