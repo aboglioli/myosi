@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared finalize for FINAL ROOT IMAGES ONLY (the main image today).
 # DO NOT source from sysext finalizers: anything staged under /usr here
 # would shadow main's copy at the runtime overlay merge (sysexts use

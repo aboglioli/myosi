@@ -1088,8 +1088,9 @@ writes a symlink into `/etc/systemd/system/…​.wants/` pointing *at* the unit
 in `/usr`. `/etc` is a writable btrfs subvolume on data-luks, so the
 enablement also **survives A/B image updates** — the root slot rolls over,
 `/etc` does not. (Enabling a **sysext-provided** unit this way is not safe:
-the symlink dangles whenever that sysext is disabled. Those use `Upholds=`
-drop-ins instead — see "Enabling units without presets".)
+the symlink dangles whenever that sysext is disabled. Those ship `Wants=`
+drop-ins under `/usr/lib` instead — see
+[Enabling units without presets](#enabling-units-without-presets-wants-not-upholds).)
 
 **Creation is driven entirely by the record file.** The helper searches two
 places, in order:
@@ -1757,7 +1758,7 @@ Both mounts it makes are inherited across `switch_root`, which is why there is n
 There is no sealed-root `/etc/crypttab`, no pre-declared slot list, and no runtime udev/template service for `data-N`. Any `data-N` device that gates `/var` must be present during initrd boot so `myosi-data-attach` can unlock it before the btrfs mount. Post-switch hotplug of unrelated encrypted disks belongs in operator-managed `/etc/crypttab` (persistent on the `/etc` subvol) or explicit units, because those disks do not gate the `/var` or `/etc` subvolumes that the boot path requires.
 
 **Critical systemd behaviour notes that drove this design:**
-- `systemd-gpt-auto-generator` does not mount non-root DPS `Type=var` partitions in the initrd; it would only handle `/var` after `switch_root`. myosi does not rely on it at all (it misbehaves on verity-protected installs) — every post-pivot mount is an explicit unit.
+- `systemd-gpt-auto-generator` does not mount non-root DPS `Type=var` partitions in the initrd; it would only handle `/var` after `switch_root`. myosi relies on it only in the initrd, to find the verity root; after `switch_root` it is disabled (`systemd.gpt_auto=0`, it misbehaves on verity-protected installs) and every post-pivot mount is an explicit unit.
 - myosi needs `/sysroot/var` AND `/sysroot/etc` before `switch_root` because both live as sibling subvolumes on the same `data-luks` btrfs volume.
 - Global `PARTLABEL=data-luks` selection is unsafe when another myosi disk is attached. The initrd helper scopes primary `/var` selection to the same disk as the booted root.
 - Pool members (`data-N`) are intentionally NOT scoped to the boot disk — multi-disk hosts keep their secondary LUKS containers on dedicated disks, and the scanner must find them across all available block devices.
@@ -3328,6 +3329,7 @@ dependent, which is the reason neither appears in the script.
 Built from `mkosi.conf` `KernelCommandLine=`. Highlights:
 - `rd.systemd.verity=1` + `systemd.verity_root_options=panic-on-corruption,restart-on-corruption`
 - `systemd.image_policy=root=signed:var=encrypted:=ignore` + `systemd.image_filter=root=root-*:var=data-*`
+- `systemd.gpt_auto=0 rd.systemd.gpt_auto=1` — gpt-auto runs only in the initrd, where it finds the verity root. After `switch_root` it only offered mounts the explicit units own, and it failed the image policy on every boot. Keep the order: `rd.*` keys are read only in the initrd, and the last key wins.
 - `rd.luks.options=key-file=/usr/share/myosi/keys/data.key,discard` + `rd.luks.timeout=120`
 - `lockdown=integrity module.sig_enforce=1 init_on_alloc=1 init_on_free=1 slab_nomerge`
 - `mitigations=auto,nosmt page_alloc.shuffle=1 randomize_kstack_offset=on vsyscall=none debugfs=off`

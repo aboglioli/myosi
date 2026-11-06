@@ -74,6 +74,7 @@ sysext_remove() {
 # package-manager sandbox mounts a fresh tmpfs over the first two and the
 # sandbox's own /var/tmp over the third, so dnf sees an empty directory there
 # ("Failed to access RPM", 2026.11.05.01). strip_to_sysext_layout drops it.
+# shellcheck disable=SC2034 # read by the build scripts that source this file
 SYSEXT_BUILD_DIR_REL=/var/lib/myosi-sysext-build
 
 # Unit activation in sysexts/profiles is DECLARATIVE only: ship static
