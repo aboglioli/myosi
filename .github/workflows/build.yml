@@ -54,13 +54,23 @@ jobs:
           # host at boot is extensionless (user-provision, sysext-select,
           # data-attach, the myosi CLI, every sub-image mkosi.postinst), so an
           # `*.sh` glob covered 4 files and missed 16 — including all of them.
+          # Sourced libraries have no shebang and declare their shell with a
+          # `# shellcheck shell=` line instead; they used to be skipped, which
+          # left the code behind sysext_install unlinted.
           mapfile -t files < <(
-            grep -rlE '^#!.*\b(ba)?sh\b' --exclude-dir=.git --exclude-dir=build . | sort
+            grep -rlE '^#!.*\b(ba)?sh\b|^# shellcheck shell=' \
+                --exclude-dir=.git --exclude-dir=build . | sort
           )
           if [ "${#files[@]}" -eq 0 ]; then
             echo "ERROR: shebang scan matched no scripts — the selector is broken" >&2
             exit 1
           fi
+          for lib in ./mkosi.shared/*.sh; do
+            if ! printf '%s\n' "${files[@]}" | grep -qxF "$lib"; then
+              echo "::error file=${lib#./}::no shebang and no '# shellcheck shell=' line, so it would not be linted"
+              exit 1
+            fi
+          done
           printf 'linting %d scripts\n' "${#files[@]}"
           printf '  %s\n' "${files[@]}"
           # No `|| true`: this gate used to swallow every finding.

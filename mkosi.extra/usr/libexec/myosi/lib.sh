@@ -196,6 +196,7 @@ resolve_boot_disk() {
 
 # Populate SYSUPDATE / SU_DIR / STORE globals from env or defaults
 # (globals on purpose — callers use them after return).
+# shellcheck disable=SC2034 # read by the just recipes in /usr/share/myosi/just
 sysupdate_env() {
     # Direct systemd-sysupdate binary (the `sysupdate` symlink), NOT updatectl:
     # systemd-sysupdated's SELinux sandbox on Fedora 44 blocks the loop

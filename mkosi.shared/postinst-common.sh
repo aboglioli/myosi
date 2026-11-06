@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared postinst for FINAL ROOT IMAGES ONLY (the main image today).
 # DO NOT source from sysext postinsts: sysexts overlay main's /usr at
 # runtime, so version metadata / extensions written here would shadow
@@ -39,7 +40,7 @@ done
 # Rootfs is read-only erofs at runtime: redirect /root → var/roothome
 # and /mnt → var/mnt (tmpfiles provisions the targets each boot).
 # /srv stays a real mountpoint (srv.mount, btrfs subvol on data-luks).
-rm -rf "$BUILDROOT/root" "$BUILDROOT/mnt" "$BUILDROOT/srv"
+rm -rf "${BUILDROOT:?}/root" "${BUILDROOT:?}/mnt" "${BUILDROOT:?}/srv"
 ln -s var/roothome "$BUILDROOT/root"
 ln -s var/mnt      "$BUILDROOT/mnt"
 mkdir -p "$BUILDROOT/srv"
