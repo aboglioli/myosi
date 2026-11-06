@@ -3233,6 +3233,14 @@ restart the unit every few seconds), and on resume
 only emits a change uevent when the state actually differs, so unplugging while
 suspended is not guaranteed to reach the udev rule).
 
+The boot run waits for `power-profiles-daemon` so `powerprofilesctl` has
+something to talk to, and upstream orders PPD `After=multi-user.target`. With
+default dependencies, `WantedBy=multi-user.target` also ordered the target after
+power-tune, which closed a cycle: systemd dropped jobs to break it on every boot,
+the boot run never happened, and the host stayed `degraded`. The unit therefore
+sets `DefaultDependencies=no` and restates the parts it needs
+(`After=basic.target`, `Conflicts=`/`Before=shutdown.target`).
+
 Every knob is a generic kernel ABI and every write is skipped when the file is
 absent, so the same script covers Intel and AMD, any cpufreq driver, and any
 vendor's charge-threshold implementation:
