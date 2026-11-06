@@ -1088,8 +1088,9 @@ writes a symlink into `/etc/systemd/system/…​.wants/` pointing *at* the unit
 in `/usr`. `/etc` is a writable btrfs subvolume on data-luks, so the
 enablement also **survives A/B image updates** — the root slot rolls over,
 `/etc` does not. (Enabling a **sysext-provided** unit this way is not safe:
-the symlink dangles whenever that sysext is disabled. Those use `Upholds=`
-drop-ins instead — see "Enabling units without presets".)
+the symlink dangles whenever that sysext is disabled. Those ship `Wants=`
+drop-ins under `/usr/lib` instead — see
+[Enabling units without presets](#enabling-units-without-presets-wants-not-upholds).)
 
 **Creation is driven entirely by the record file.** The helper searches two
 places, in order:
