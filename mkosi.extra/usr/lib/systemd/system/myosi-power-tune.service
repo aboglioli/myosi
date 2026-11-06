@@ -3,7 +3,13 @@ Description=Apply myosi AC/battery power policy
 Documentation=file:///usr/libexec/myosi/power-tune
 # Laptop-only: with no BAT* the unit is skipped, not failed.
 ConditionPathExistsGlob=/sys/class/power_supply/BAT*
-After=sysinit.target power-profiles-daemon.service
+# No default deps, so WantedBy=multi-user.target does not order the target
+# after this unit: PPD's upstream unit is After=multi-user.target, and that
+# implicit Before= closed an ordering cycle that dropped this job every boot.
+DefaultDependencies=no
+After=basic.target power-profiles-daemon.service
+Conflicts=shutdown.target
+Before=shutdown.target
 # Wants=, not Requires=: PPD ships only in the desktop profile.
 Wants=power-profiles-daemon.service
 
