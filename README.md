@@ -2767,9 +2767,9 @@ Maintenance touches both. **Order matters: inner first, then outer.** Defragment
 systemctl list-timers --all
 ```
 
-Shipped enabled: `fstrim.timer` only (Fedora's weekly default; discards on every mounted FS that supports it).
+Shipped enabled: `fstrim.timer` (Fedora's weekly default; discards on every mounted FS that supports it) and `btrfs-scrub.timer` (monthly scrub of the pool).
 
-**Scrub is configured but deliberately NOT enabled.** The `btrfsmaintenance` package is installed, so the native units exist — `btrfs-scrub`, `btrfs-balance`, `btrfs-trim`, `btrfs-defrag`, each with a `.service` and `.timer`, plus `btrfsmaintenance-refresh.path` — and `/etc/sysconfig/btrfsmaintenance` already points them at this layout. Every unit is left inactive: whether a multi-hour read of the whole pool belongs on a schedule depends on the host, so that part is the operator's call.
+**Scrub runs monthly by default.** The `btrfsmaintenance` package is installed, so the native units exist — `btrfs-scrub`, `btrfs-balance`, `btrfs-trim`, `btrfs-defrag`, each with a `.service` and `.timer`, plus `btrfsmaintenance-refresh.path` — and `/etc/sysconfig/btrfsmaintenance` already points them at this layout. Only the scrub timer is preset-enabled: data is single-copy, so nothing else would ever find silent corruption in data you have not read lately. Balance, trim and defrag stay off.
 
 (`btrfs-progs` ships no systemd units of its own on Fedora. Earlier revisions of this document told you to enable a `btrfs-scrub@<mountpoint>.timer`; that template does not exist, and the command silently did nothing.)
 
@@ -2800,16 +2800,14 @@ sudo btrfs device stats /var               # non-zero counters = a disk going ba
 
 `-B` keeps it in the foreground so you see the result; drop it to run detached and poll with `status`.
 
-#### If you want it scheduled
+#### The schedule
 
-The image enables no timer — that decision is yours. The config is already pointed at the pool, so it is one command:
+`btrfs-scrub.timer` is enabled by `40-myosi-fedora.preset`: monthly (the 1st, 00:00), `Persistent=true` (a missed run fires at the next boot), idle I/O and CPU priority. The first run is the next 1st of the month, not the boot that enables it. To opt a host out:
 
 ```bash
-sudo systemctl enable --now btrfs-scrub.timer
 systemctl list-timers btrfs-scrub.timer
+sudo systemctl disable --now btrfs-scrub.timer
 ```
-
-Monthly, `Persistent=true` (a missed run fires at the next boot), idle I/O and CPU priority.
 
 `mkosi.extra/etc/sysconfig/btrfsmaintenance` is the Fedora file with four values changed — `BTRFS_{SCRUB,BALANCE,TRIM}_MOUNTPOINTS` from `/` to `/var`, and `BTRFS_BALANCE_PERIOD` from `weekly` to `none`. Upstream aims at `/`, which here is read-only verity-erofs: `btrfs-scrub.sh` skips any non-btrfs path and exits 0, so the packaged default would have given you a green timer that scrubs nothing. `/var` alone suffices — one filesystem, four subvolumes. Balance is `none` because unattended balance on `Data,single` is operator judgment; trim is `none` so it does not collide with `fstrim.timer`.
 
@@ -2823,6 +2821,28 @@ To change the cadence, set `BTRFS_SCRUB_PERIOD` to any `systemd.time(7)` calenda
 
 Fedora ships no `btrfs-scrub@.timer` template; the units are plain, one per task, driven by this config file.
 
+### Disk health and device firmware
+
+Base ships `smartmontools`, `nvme-cli` and `fwupd`.
+
+`smartd.service` is preset-enabled and skips itself in VMs. It polls every disk every 30 minutes and logs SMART health failures and attribute changes to the journal. On a warning, Fedora's `smartdnotify` also sends a critical desktop notification to graphical sessions (via `notify-send`, from the desktop sysext) and a `wall` message. There is no mail transport, so headless hosts only have the journal:
+
+```bash
+sudo smartctl -H -A /dev/nvme0     # overall health + attributes
+sudo nvme smart-log /dev/nvme0     # NVMe wear (percentage_used), media errors, temperature
+journalctl -u smartd --since "1 month ago"
+```
+
+`fwupd` updates device firmware from LVFS: NVMe/SATA SSDs, Thunderbolt and USB docks, Logitech receivers, and other peripherals whose vendors publish there. It is D-Bus activated, so no unit is enabled and nothing is checked or installed on a schedule:
+
+```bash
+fwupdmgr refresh           # fetch LVFS metadata
+fwupdmgr get-updates
+fwupdmgr update
+```
+
+**BIOS/UEFI capsule updates are not supported.** fwupd finds the ESP only through udisks2, and a capsule update needs `fwupd-efi` and a shim beside it on the ESP. None of these are in the image, so `/etc/fwupd/fwupd.conf` disables the `uefi_capsule` plugin rather than have it warn on every call. Update the BIOS from the vendor's own tool or firmware setup. The Secure Boot database plugins (`uefi_dbx`, `uefi_kek`, …) stay enabled.
+
 ### Manual maintenance — recommended cadence
 
 **Weekly (timer):** `fstrim -av`. Already automated by `fstrim.timer`. Verify:
@@ -2831,7 +2851,7 @@ Fedora ships no `btrfs-scrub@.timer` template; the units are plain, one per task
 sudo journalctl -u fstrim.service --since "1 month ago"
 ```
 
-**Monthly (timer, once you enable it):** `btrfs scrub`. One pass over `/var` scrubs the whole data-luks pool. Verify:
+**Monthly (timer):** `btrfs scrub`. One pass over `/var` scrubs the whole data-luks pool. Verify:
 
 ```bash
 sudo btrfs scrub status /var           # the pool: /var /etc /home /srv

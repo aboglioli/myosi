@@ -159,6 +159,17 @@ else
     bad "myosi bridge-status dispatches" "$(printf '%s' "$BRIDGE_OUT" | head -1)"
 fi
 
+echo "== disk health =="
+check "btrfs-scrub.timer enabled" "enabled" "$(systemctl is-enabled btrfs-scrub.timer 2>/dev/null)"
+check "btrfs-scrub.timer active"  "active"  "$(systemctl is-active btrfs-scrub.timer 2>/dev/null)"
+# smartd is enabled but ConditionVirtualization=no keeps it from starting here.
+check "smartd.service enabled"    "enabled" "$(systemctl is-enabled smartd.service 2>/dev/null)"
+for tool in smartctl nvme fwupdmgr; do
+    check "$tool present" "yes" "$(command -v "$tool" >/dev/null && echo yes || echo no)"
+done
+check "fwupd uefi_capsule disabled" "DisabledPlugins=uefi_capsule" \
+    "$(grep -m1 '^DisabledPlugins=' /etc/fwupd/fwupd.conf 2>/dev/null)"
+
 echo "== mounts =="
 for u in var.mount home.mount srv.mount; do
     check "$u active" "active" "$(systemctl is-active "$u" 2>/dev/null)"
