@@ -44,10 +44,12 @@ jobs:
         #   python3-pip   (apt)            — needed to install mkosi
         #                                    from git in the next line.
         #   mkosi         (pip from git)   — provides `mkosi summary`.
+        #                                    Same commit the build job's
+        #                                    systemd/mkosi action pins.
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck python3-pip
-          pip install --break-system-packages git+https://github.com/systemd/mkosi.git
+          pip install --break-system-packages git+https://github.com/systemd/mkosi.git@a6753e508681aa162cef4e5183f1a728c11c4d78
       - name: Lint shell scripts
         run: |
           # Select by shebang, not by extension. Every script that runs on a
@@ -129,7 +131,11 @@ jobs:
           fetch-depth: 0
           path: src
 
-      - uses: systemd/mkosi@main
+      # Pinned: @main put an unreviewed mkosi under every release, and the
+      # sysext postinsts depend on its mkosi-install sandbox. a6753e5 is the
+      # main commit that built 2026.11.05.01. Bump it here and in the
+      # validate job's pip install together, after a tag build passes on it.
+      - uses: systemd/mkosi@a6753e508681aa162cef4e5183f1a728c11c4d78
 
       - name: Install runner build tools
         # All host-side CLI tools used by the build job, in one place.
