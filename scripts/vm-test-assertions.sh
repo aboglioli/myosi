@@ -137,6 +137,11 @@ for k in iommu=pt intel_iommu=on; do
     grep -qw "$k" /proc/cmdline && ok "$k present" \
         || bad "$k present" "missing from /proc/cmdline"
 done
+# Reaching this script at all proves the initrd still found the verity root
+# with gpt-auto; this proves the host-side run, which failed the image policy
+# on every boot, is gone.
+GENERATOR_FAILURES=$(journalctl -b --no-pager -o cat 2>/dev/null | grep -c 'generator.* failed with exit status')
+check "no failed generators this boot" "0" "$GENERATOR_FAILURES"
 
 echo "== operator tooling =="
 # lspci used to arrive only as some sysext's transitive dependency, so a host
