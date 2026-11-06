@@ -6,6 +6,8 @@ name: myosi
 # The build job runs only for tag refs and uploads the artifacts as
 # assets of that tag's Release (created with the bare tag as title if
 # missing; an existing Release keeps its name and prerelease flag).
+# Prefer pushing the tag: the Release then first appears with every
+# asset. A Release made in the web UI is held as a draft until upload.
 # PRs and pushes to main run the cheap validate job only. A
 # workflow_dispatch from a tag ref re-runs the full build+upload.
 
@@ -130,6 +132,28 @@ jobs:
         with:
           fetch-depth: 0
           path: src
+
+      - name: Hold an empty Release as draft until its assets exist
+        # A Release created in the web UI is published, and Latest, before
+        # this job has uploaded anything. sysupdate reads
+        # releases/latest/download/, so every host saw an empty release for
+        # the whole build, and kept seeing it when 2026.11.02.01 and the
+        # first 2026.11.05.01 failed. A draft is never Latest; the upload
+        # step publishes it. Releases that already have assets are left
+        # alone, so a rebuild never hides a working release.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          state=$(gh release view "$TAG" -R "$REPO" --json isDraft,assets \
+              --jq 'if .isDraft then "draft" else (.assets | length | tostring) end' \
+              2>/dev/null) || exit 0
+          if [ "$state" = 0 ]; then
+            gh release edit "$TAG" -R "$REPO" --draft=true
+            echo "::notice::$TAG has no assets yet; held as a draft until the upload step"
+          fi
 
       # Pinned: @main put an unreviewed mkosi under every release, and the
       # sysext postinsts depend on its mkosi-install sandbox. a6753e5 is the
@@ -430,14 +454,33 @@ jobs:
         # prerelease flag of an existing Release (the old softprops
         # action renamed every release to "myosi <version>" after the
         # run). A Release is created only when the tag has none yet,
-        # titled with the bare tag.
+        # titled with the bare tag, and with its assets in the same call:
+        # gh keeps it a draft until every upload has finished. A draft
+        # (new, or held by the step at the top of this job) is published
+        # only now. Latest only when this is the newest published calver,
+        # so rebuilding an old tag never moves every host back to it.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          if ! gh release view "$TAG" -R "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release create "$TAG" -R "${{ github.repository }}" \
-                --title "$TAG" --notes ""
+          published=$(gh release list -R "$REPO" --exclude-drafts --exclude-pre-releases \
+              --limit 1000 --json tagName --jq '.[].tagName')
+          newest=$(printf '%s\n%s\n' "$published" "$TAG" | sort -V | tail -n 1)
+          latest=false
+          [ "$newest" = "$TAG" ] && latest=true
+
+          if ! state=$(gh release view "$TAG" -R "$REPO" --json isDraft,isPrerelease \
+                  --jq '"\(.isDraft) \(.isPrerelease)"' 2>/dev/null); then
+            gh release create "$TAG" release/* -R "$REPO" \
+                --title "$TAG" --notes "" --latest="$latest"
+            exit 0
           fi
-          gh release upload "$TAG" release/* --clobber -R "${{ github.repository }}"
+
+          gh release upload "$TAG" release/* --clobber -R "$REPO"
+          read -r is_draft is_prerelease <<< "$state"
+          if [ "$is_draft" = true ]; then
+            [ "$is_prerelease" = true ] && latest=false
+            gh release edit "$TAG" -R "$REPO" --draft=false --latest="$latest"
+          fi
