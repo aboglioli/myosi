@@ -29,3 +29,9 @@ disable systemd-homed-firstboot.service
 
 # bootc auto-update conflicts with sysupdate-driven UKI rollover.
 disable bootc-fetch-apply-updates.timer
+
+# Disk health. Data is single-copy, so a monthly scrub of /var is the only
+# thing that finds silent corruption; smartd logs SMART health changes and
+# skips itself in VMs.
+enable btrfs-scrub.timer
+enable smartd.service
