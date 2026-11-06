@@ -173,6 +173,15 @@ check "var-mnt-backups.mount NOT active"   "inactive" "$(systemctl is-active var
 check "var-mnt-backups.mount NOT enabled"  "static"   "$(systemctl is-enabled var-mnt-backups.mount 2>/dev/null)"
 check "/mnt/backups exists, unmounted"     ""         "$(findmnt -no TARGET /var/mnt/backups 2>/dev/null)"
 
+echo "== boot loader =="
+check "systemd-boot-update enabled" "enabled" "$(systemctl is-enabled systemd-boot-update.service 2>/dev/null)"
+check "systemd-boot-update active"  "active"  "$(systemctl is-active systemd-boot-update.service 2>/dev/null)"
+loader_info() { grep -aoE -m1 'LoaderInfo: systemd-boot [^ #]+' "$1" 2>/dev/null | head -1; }
+IMAGE_LOADER=$(loader_info /usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed)
+SHIM_STAGE2=$(find /efi/EFI/BOOT -maxdepth 1 -iname grubx64.efi 2>/dev/null | head -1)
+check "image ships a signed sd-boot" "yes" "$([ -n "$IMAGE_LOADER" ] && echo yes || echo no)"
+check "shim second stage matches image sd-boot" "$IMAGE_LOADER" "$(loader_info "$SHIM_STAGE2")"
+
 echo "== units =="
 # systemd-tpm2-setup fails on first boot (writes the anchor secret, then
 # exits 1 on "NvPCRs already initialized"). Tracked separately; allowlisted
