@@ -31,8 +31,16 @@ etc-list:
     # A deleted factory file leaves an overlayfs whiteout in the upper: a
     # character device with major/minor 0:0, not a regular file.
     cd {{UPPER}}
-    find . -mindepth 1 \( -type f -o -type l \) -printf 'changed  %P\n'
-    find . -mindepth 1 -type c -printf 'deleted  %P\n'
+    # Some /etc subdirectories are 0750 root-only: a non-root audit lists what
+    # it can read and says so, while root keeps find's real exit status.
+    if [ "$EUID" -ne 0 ]; then
+        echo "NOTE: run as root for a complete list." >&2
+        exec 2>/dev/null
+    fi
+    status=0
+    find . -mindepth 1 \( -type f -o -type l \) -printf 'changed  %P\n' || status=$?
+    find . -mindepth 1 -type c -printf 'deleted  %P\n' || status=$?
+    [ "$EUID" -ne 0 ] || exit "$status"
 
 # Show the content difference between /etc and the image's defaults.
 [group('etc')]
@@ -93,6 +101,10 @@ etc-prune apply="":
     # Without the upper we cannot tell what is overridden, and a
     # reassuring answer would be a wrong one.
     mountpoint -q /.etc || { echo "/.etc is not mounted — /etc is not overlay-backed on this boot." >&2; exit 1; }
+    if [ "$EUID" -ne 0 ]; then
+        echo "NOTE: run as root for a complete audit." >&2
+        exec 2>/dev/null
+    fi
     dead=()
     # An upper file identical to the image's version: overriding nothing.
     while IFS= read -r rel; do
