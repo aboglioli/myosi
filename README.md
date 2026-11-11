@@ -2,7 +2,7 @@
 
 Personal atomic, immutable Linux distribution built from raw mkosi + systemd primitives. Signed dm-verity erofs root, A/B sysupdate slots, signed sysexts for optional userspace features (kernel modules included), and an `/etc` assembled at boot as an overlay — verity-baked factory defaults underneath, a btrfs subvolume on the encrypted data-luks pool holding only what this host changed. Fedora 44 base. No bootc, no ostree, no rpm-ostree.
 
-The base image is the same on every host. Hostname and local tweaks live in the overlay upper at `/.etc/etc` on `data-luks`; every path nobody touched shows through from the verity-baked `/usr/share/factory/etc` factory tree and therefore tracks the image across upgrades. Optional features (desktop, containers, virt, firmware, NVIDIA Turing+, NVIDIA Pascal/Maxwell/Volta legacy, OpenZFS) are added per host by enabling signed sysexts on top of the slim base. Every kernel module shipped in a sysext is signed with `boot.key` so it passes `module.sig_enforce=1` at load.
+The base image is the same on every host. Hostname and local tweaks live in the overlay upper at `/.etc/etc` on `data-luks`; every path nobody touched shows through from the verity-baked `/usr/share/factory/etc` factory tree and therefore tracks the image across upgrades. Optional features are added per host by enabling signed sysexts on top of the base: **`desktop`, `devel`, `nvidia`, `nvidia-580xx` and `zfs`** today. **`containers` and `virt` are currently baked into the base** via `mkosi.conf` `Profiles=`; their sysext artifacts are kept for the planned sysext-only transition but are redundant on today's fleet. Every kernel module shipped in a sysext is signed with `boot.key` so it passes `module.sig_enforce=1` at load.
 
 **See the Design notes and Multi-disk storage runbook appendices below for full architecture, rationale, multi-disk patterns, and milestones.**
 
@@ -20,7 +20,7 @@ The base image is the same on every host. Hostname and local tweaks live in the 
 | `/etc` model | layered via ostree 3-way merge | overlayfs assembled pre-pivot: `lowerdir=/usr/share/factory/etc` (verity-baked), `upperdir=/.etc/etc` (btrfs subvol on `data-luks`) |
 | Boot chain | shim → GRUB → BLS entries | shim → sd-boot → signed UKI |
 | Per-host config | host-specific image variant | the `/etc` overlay upper on `data-luks` |
-| Optional features | host-specific image variant | sysext merged into `/usr` (enabled per host) |
+| Optional features | host-specific image variant | sysext merged into `/usr`; containers/virt currently baked into base |
 | Distribution | GHCR registry | GitHub Releases (signed `.raw` files) |
 
 Both will coexist for some time. `myos` continues to serve hosts. `myosi` is hardened in parallel and replaces hosts one-by-one when stable.
@@ -68,7 +68,7 @@ root-b / verity / sig             same triple (slot B; empty placeholder until f
 data                 luks2+btrfs      grows to fill disk; /var, /home, /srv, /backups subvolumes
 ```
 
-Slot sizes are pinned (`SizeMinBytes=SizeMaxBytes`) so systemd-repart's build and `--split=yes` passes agree on verity hash offsets — without that the verity-sig partition ends up empty and the build fails. 5G slots hold ~2.2 GiB of base root content today, leaving room to embed `containers` / `virt` / `firmware` sysexts directly into the verity-baked root in future without changing the partition layout.
+Slot sizes are pinned (`SizeMinBytes=SizeMaxBytes`) so systemd-repart's build and `--split=yes` passes agree on verity hash offsets — without that the verity-sig partition ends up empty and the build fails. 5G slots hold ~2.2 GiB of base root content today; `containers`/`virt` are already baked into that tree, and the headroom covers future growth without changing the partition layout.
 
 **Image artifacts produced by `just build`** (every name carries the build `ARCH`, e.g. `x86-64` or `arm64`, set by `Output=%i_%v_%a` on every sub-image):
 | Artifact | Purpose |
@@ -78,9 +78,9 @@ Slot sizes are pinned (`SizeMinBytes=SizeMaxBytes`) so systemd-repart's build an
 | `myosi_VERSION_ARCH_<ROOT_UUID>.root.raw.zst` | Signed root partition for sysupdate. The PartitionUUID embedded in the filename is the first 16 bytes of the dm-verity root hash (Discoverable Partitions Spec). Captured at apply time via the `@u` wildcard in `10-root.transfer`. Auto-renamed from the bare `myosi_VERSION_ARCH.root.raw.zst` by `scripts/stage-artifacts.sh` (invoked by both `just build` and CI after `mkosi build`). |
 | `myosi_VERSION_ARCH_<VERITY_UUID>.verity.raw.zst` | Verity hash partition for sysupdate. UUID is the LAST 16 bytes of the root hash. Same `@u` mechanism. |
 | `myosi_VERSION_ARCH.verity-sig.raw.zst` | Verity signature partition |
-| `containers_VERSION_ARCH.raw` | Sysext: Podman, Distrobox, Compose, Skopeo, Incus + container-selinux baked into base policy |
+| `containers_VERSION_ARCH.raw` | Sysext: Podman, Distrobox, Compose, Skopeo, Incus + container-selinux baked into base policy. **Redundant today**: `mkosi.conf` also bakes the `containers` profile into the base; retained for the future sysext-only transition. |
 | `desktop_VERSION_ARCH.raw` | Sysext: Niri, audio, apps, and qutebrowser as the primary browser — its QtWebEngine links the system ffmpeg, so this sysext also carries RPM Fusion's full `ffmpeg` (see the codec stack section). Lists no font packages — the user installs fonts into `~/.local/share/fonts` (`myenv install-fonts`); only GTK's dependency fonts come along as a fallback. `pipewire-alsa` installs its ALSA routing into `/etc/alsa/conf.d`, which a sysext cannot deliver, so `/usr/etc/alsa/conf.d` (also on ALSA's search path) links to it instead; without that, ALSA clients such as `arecord` or Voxtype bypass PipeWire and fail to capture on `default`. |
-| `virt_VERSION_ARCH.raw` | Sysext: libvirt, qemu, vfio, virt-manager |
+| `virt_VERSION_ARCH.raw` | Sysext: libvirt, qemu, vfio, virt-manager. **Redundant today**: `mkosi.conf` also bakes the `virt` profile into the base; retained for the future sysext-only transition. |
 | `nvidia_VERSION_ARCH.raw` | Sysext: NVIDIA `current` (595.x open kernel modules, Turing+ — RTX 16xx/20xx/30xx/40xx/50xx). All `nvidia*.ko` signed with `boot.key`. |
 | `nvidia-580xx_VERSION_ARCH.raw` | Sysext: NVIDIA `580xx` legacy proprietary modules (Maxwell / Pascal / Volta — GTX 9xx/10xx, Titan V). All `nvidia*.ko` signed with `boot.key`. |
 | `devel_VERSION_ARCH.raw` | Sysext: native build toolchain — gcc, gcc-c++, binutils, glibc-devel, make, cmake, ninja, autotools, plus the `-devel` packages (headers + unversioned `*.so` symlinks) for the libraries native builds usually link: zlib, openssl, zstd, lz4, curl, sasl, sqlite, libffi, systemd. No language runtimes — those are mise's job. |
@@ -126,7 +126,7 @@ myosi/
 ├── mkosi.repart/            # build-time partition defs (4: ESP + root-A + verity-A + verity-sig-A) — mkosi auto-discovers
 ├── mkosi.extra/usr/lib/repart.d/ # runtime/first-boot expansion layout (8 partitions: build set + root-B + verity-B + verity-sig-B + data-luks)
 ├── mkosi.postinst           # main-image postinst: SELinux module, signing certs to
-│                              /usr/share/myosi/keys + /efi/keys, LUKS bootstrap key
+│                              /usr/share/myosi/keys + /efi/keys, LUKS key to /usr only
 ├── mkosi.finalize           # snapshots /etc to /usr/share/factory/etc, then wipes /etc
 ├── mkosi.version            # resolves the calver ImageVersion (counter cache, 300s TTL)
 ├── mkosi.local.conf.example # template for untracked host/build overrides
@@ -663,8 +663,8 @@ socket unit is the fix whenever it happens.
 
 ### Enabling units without presets: `Wants=`, not `Upholds=`
 
-myosi never runs `systemctl preset-all`, and `/etc` enable symlinks do
-not survive an image rebuild — so a package's `[Install] WantedBy=` is
+Sysexts never run `systemctl preset-all` (only the main image's postinst
+does), and `/etc` enable symlinks do not survive an image rebuild — so a package's `[Install] WantedBy=` is
 inert. The stand-in is a target drop-in under `/usr` (rides the sysext,
 applies fleet-wide, needs no writable `/etc`):
 
@@ -893,6 +893,26 @@ fix in this development cycle. Quick index:
   separate gates and an earlier round of this doc conflated them; setting
   only the discard flag left a 20 s+ minimize on every shutdown. See
   [the sizing policy](#3a1-user-management-with-systemd-homed).
+- The LUKS bootstrap key is present in every **public** release artifact
+  (verity root + initrd) and CI reuses one stable `MYOSI_DATA_KEY`. Any
+  host that has not killed slot 0 is decryptable by anyone who obtains the
+  disk. `mkosi.postinst` no longer copies it to `/efi`, and
+  `myosi security-check` now reports whether the bootstrap key still opens
+  `data-luks` (plus root password and dead `/etc` overrides). Treat a host
+  as finalized only after that check passes.
+- `mkosi.shared/postinst-common.sh` now regenerates `/etc/authselect` from
+  the image's `authselect.conf` before the factory snapshot. Fedora's RPMs
+  ship the generated tree from the *default* profile, so the factory
+  `/etc/authselect/system-auth` used to lack `pam_systemd_home` even though
+  the image declares `with-systemd-homed`; first boot fixed it only because
+  `/var/lib/authselect/checksum` was absent. `authselect check`
+  gates the build, and the build fails loudly if the generated PAM stack does not contain `pam_systemd_home`.
+  Existing hosts with a stale `/var/lib/authselect/checksum` and an
+  `/etc` upper still need the documented one-time checksum reset; the build
+  fix only guarantees the factory tree.
+- `myosi security-check` trusts the kernel keyring test the same way
+  `extension-enable` does: `image.crt` in `.platform` (db-enrolled) or
+  `.machine` (MOK-enrolled), matched by the CN of the shipped certificate.
 
 ---
 
@@ -962,7 +982,8 @@ so this needs no rebuild and no credentials:
 # 1. Log in at the CONSOLE as root / changeme.
 
 # 2. Create your user. Pick the real name now — a homed user cannot be
-#    renamed later.
+#    renamed later. Sysext groups (libvirt, incus-admin) are bound by the
+#    user-groups.d drop-ins, baked profile or not.
 myosi user-create <you> homed 1000 wheel,video,render,input,kvm
 
 # 3. Rotate off the bootstrap password.
@@ -975,6 +996,10 @@ passwd -l root
 
 # 5. Name the host.
 hostnamectl hostname <hostname>
+
+# 6. Finalize data-luks (step 3d) and verify the host. This must report
+#    "bootstrap key no longer unlocks" before the disk counts as encrypted.
+myosi security-check
 ```
 
 ##### `myosi user-create` parameters
@@ -1520,7 +1545,7 @@ Secure Boot can be disabled and the base image will still boot, but signed verit
 
 **On first boot, `systemd-repart` formats `data-luks` with a bootstrap key from the UKI (slot 0).** The key was generated at build time by `scripts/generate-bootstrap-key.sh` and embedded in the verity-baked root at `/usr/share/myosi/keys/data.key`. The initrd `myosi-data-attach` service probes this key first before falling through to TPM2/passphrase, so boot is non-interactive on systems with or without TPM2.
 
-**THIS IS WHY THE FOLLOW-UP STEP IS MANDATORY.** Anyone with physical access to the unencrypted ESP can extract the UKI, pull the key out, and unlock the disk. The build-time key is the active unlock token until you replace it.
+**THIS IS WHY THE FOLLOW-UP STEP IS MANDATORY.** The key is baked into the verity root and initrd inside every **public** release artifact, and CI deliberately reuses a stable `MYOSI_DATA_KEY` across releases. Anyone who obtains the disk can download the release, extract the key, and unlock the container; physical access to the ESP is not required. `/efi/keys/data.key` is not shipped, and is safe to delete on hosts built before this change. The build-time key is the active unlock token until you replace it.
 
 Architecture chosen because:
 - Universal: same image works on TPM2 hardware, no-TPM hardware (old machines, VMs without swtpm, servers with TPM disabled in BIOS).
@@ -1531,7 +1556,9 @@ To finalise the install you typically:
 1. Enroll a real auth method (TPM2 if the host has one, passphrase otherwise).
 2. Wipe the build-time bootstrap key slot.
 
-Both must happen for the host to be considered installed. Until they do, treat the disk as if it weren't encrypted.
+Both must happen for the host to be considered installed. Until they do, treat the disk as if it weren't encrypted. `sudo myosi security-check` reports this explicitly and exits non-zero while the bootstrap key still opens the device.
+
+On a host with no TPM (or a TPM you do not want to bind), kill slot 0 only after adding a passphrase; the initrd will then prompt on `console=tty0` at every boot. Use `systemd-cryptenroll --recovery-key` for an offline break-glass key. A headless host that cannot tolerate a prompt needs TPM2 or a FIDO2 token.
 
 Reference for crypttab / luks tooling: `systemd-cryptenroll(1)`, `cryptsetup(8)`, `crypttab(5)`.
 
@@ -1622,13 +1649,16 @@ sudo systemd-cryptenroll --wipe-slot=recovery "$DEV"
 
 #### 3e. Enable sysext features
 
-Sysexts are signed `.raw` images that merge into `/usr`. Each optional feature is disabled until the host opts in. The helper writes the feature drop-in (`/etc/sysupdate.d/<name>.feature.d/enable.conf`), downloads the release asset for the BOOTED image's `IMAGE_VERSION` (public repo, plain HTTPS — no GitHub auth needed) into the versioned store at `/var/lib/myosi/extensions/`, and refreshes the sysext overlay (`sysext-select` links the matching version into `/var/lib/extensions/`). From then on `myosi update` moves the sysext forward in lockstep with the base image.
+Sysexts are signed `.raw` images that merge into `/usr`. Optional sysexts are disabled until the host opts in; `containers` and `virt` are the exception today because their profiles are baked into the base. The helper writes the feature drop-in (`/etc/sysupdate.d/<name>.feature.d/enable.conf`), downloads the release asset for the BOOTED image's `IMAGE_VERSION` (public repo, plain HTTPS — no GitHub auth needed) into the versioned store at `/var/lib/myosi/extensions/`, and refreshes the sysext overlay (`sysext-select` links the matching version into `/var/lib/extensions/`). From then on `myosi update` moves the sysext forward in lockstep with the base image.
 
 Enable the features this host needs:
 
 ```bash
-sudo myosi extension-enable containers     # podman, distrobox, skopeo, incus
-sudo myosi extension-enable virt           # libvirt, qemu, vfio, virt-manager
+# containers/virt are baked into the base today (mkosi.conf Profiles=...).
+# Do NOT enable their sysexts yet: they duplicate the baked packages and
+# are retained only for the future sysext-only transition.
+# sudo myosi extension-enable containers
+# sudo myosi extension-enable virt
 sudo myosi extension-enable desktop        # niri, terminals, waybar, pipewire, mesa
 sudo myosi extension-enable devel          # gcc, binutils, make, cmake, common -devel
 sudo myosi extension-enable zfs            # OpenZFS module + userspace
@@ -1640,6 +1670,13 @@ NVIDIA hosts must pick exactly one branch:
 sudo myosi extension-enable nvidia         # Turing+ / RTX generations, open kmod
 sudo myosi extension-enable nvidia-580xx   # Maxwell/Pascal/Volta legacy branch
 ```
+
+NVIDIA containers use **CDI**: the sysext ships `nvidia-cdi-refresh.{path,service}`,
+which writes `/var/run/cdi/nvidia.yaml`, and `--device nvidia.com/gpu=all` hands a
+container the GPU. The base image ships no legacy OCI hook. Clients that cannot
+pass a CDI device (Wolf's per-session containers arrive through podman's
+docker-compat API) need a host-local hook in that host's own `/etc`.
+`myosi security-check` reports a missing CDI spec.
 
 Disable a feature:
 
@@ -1666,9 +1703,11 @@ sudo myosi update
 sudo reboot
 ```
 
+`myosi update` prints a warning when the public bootstrap key still unlocks `data-luks`; finalize the host (step 3d) before treating the disk as encrypted.
+
 One `systemd-sysupdate update` run covers the whole generation atomically: base root + verity + verity-sig + every feature-enabled sysext share one version identifier in `/usr/lib/sysupdate.d/`, and sysupdate never offers a version unless ALL of those transfers have assets for it. The UKI transfer is numbered last (`90-uki.transfer`) so the entry point is written only after everything else landed.
 
-Updates stage only: the new root lands in the inactive A/B slot, the new UKI on the ESP with boot-counting armed (`+3` tries — sd-boot rolls back to the previous UKI/slot after repeated boot failures, `systemd-bless-boot` blesses a healthy boot), and new sysext versions land in the store at `/var/lib/myosi/extensions/` WITHOUT touching the running overlay — `sysext-select` keeps the booted image's versions merged until you reboot into the new slot. Rollback works the same way in reverse: booting the old slot re-selects the old sysexts.
+Updates stage only: the new root lands in the inactive A/B slot, the new UKI on the ESP with boot-counting armed (`+3` tries — sd-boot rolls back to the previous UKI/slot after repeated boot failures, `systemd-bless-boot` blesses a healthy boot), and new sysext versions land in the store at `/var/lib/myosi/extensions/` WITHOUT touching the running overlay — `sysext-select` keeps the booted image's versions merged until you reboot into the new slot. Rollback works the same way in reverse: booting the old slot re-selects the old sysexts. `systemd-bless-boot.service` is static and stays `inactive` until boot counting is active; `systemd-bless-boot-generator` pulls it into `boot-complete.target` when the booted UKI has a `+N` suffix, so check `/run/boot-counting` rather than `is-enabled`.
 
 If you intentionally want live extension activation without rebooting:
 
@@ -2488,18 +2527,20 @@ present in `.platform`, `/usr` on erofs over `/dev/mapper/root`, and no
 `ENOKEY`. Check the keyring specifically rather than concluding from a
 successful boot — a missing image cert costs you sysexts, not the boot.
 
-Sysexts are not in the disk image; add them the same way a hardware host
-does (step 3e), or drop the raws into `/var/lib/extensions/` over SSH.
+Opt-in sysexts are not in the disk image; add them the same way a hardware
+host does (step 3e), or drop the raws into `/var/lib/extensions/` over SSH.
+(`containers`/`virt` are baked into the base today; do not enable their
+sysexts.)
 
 ### Sysexts in a VM
 
-Nothing optional ships in the disk image. With the guest on the network,
-`extension-enable` pulls the asset matching the booted `IMAGE_VERSION`
-straight from the public release over HTTPS (step 3e):
+The VM already has containers/virt from the base. With the guest on the
+network, `extension-enable` pulls an opt-in sysext matching the booted
+`IMAGE_VERSION` straight from the public release over HTTPS (step 3e):
 
 ```bash
-sudo myosi extension-enable containers
-sudo myosi extension-enable virt
+sudo myosi extension-enable devel
+# sudo myosi extension-enable desktop
 sudo reboot
 ```
 
@@ -3126,8 +3167,9 @@ there — which is how a stray host sshd once passed itself off as the guest.
 `scripts/vm-test-assertions.sh` runs inside the guest and checks SELinux
 enforcement and a zero AVC count, the label on every path whose `t` line
 was removed, the tmpfiles outcomes including the persistent journal and
-the entries that should now be absent, the NoCOW policy, the mounts, and
-the podman storage split. `systemd-tpm2-setup.service` is allowlisted as a
+the entries that should now be absent, the NoCOW policy, the mounts, the
+factory authselect PAM stack (`pam_systemd_home`), the absence of the
+bootstrap key on the ESP, and the podman storage split. `systemd-tpm2-setup.service` is allowlisted as a
 known first-boot failure so the job reports regressions rather than a
 standing red.
 
@@ -3390,7 +3432,7 @@ just install /dev/nvme0n1 /dev/sdb   # clone the booted USB onto NVMe
 
 The `myosi` wrapper only handles **myosi-specific orchestration**: sysupdate (GitHub releases), sysext feature management, and the install script. Everything else (LUKS keyslots, btrfs subvols, snapshots, portable services, credentials) is run with the upstream tool directly — see the post-install runbook (under Installing to real hardware) for the manual commands.
 
-The wrapper scans `/usr/share/myosi/just/` (base modules `00-update.just`, `10-extensions.just`, `25-network.just`, `40-install.just`) and any sysext-provided `*.just` modules at every invocation, emitting a transient justfile in `/run/myosi/`. Sysexts can add their own operator commands without the base image knowing about them. Run `myosi --list` to see what's currently available.
+The wrapper scans `/usr/share/myosi/just/` (base modules `00-update.just`, `10-extensions.just`, `15-security.just`, `20-etc.just`, `25-network.just`, `30-users.just`, `40-install.just`) and any sysext-provided `*.just` modules at every invocation, emitting a transient justfile in `/run/myosi/`. Sysexts can add their own operator commands without the base image knowing about them. Run `myosi --list` to see what's currently available.
 
 ```bash
 sudo myosi extension-enable   NAME [VERSION]   # enable a sysext feature
@@ -3400,6 +3442,7 @@ sudo myosi update                              # stage base + sysexts + machines
 sudo myosi update --refresh                    # …plus live sysext refresh
 sudo myosi status                              # update + sysext state
 sudo myosi vacuum                              # remove old generations
+sudo myosi security-check                      # LUKS, password and /etc finalization
 sudo myosi bridge-create      [--iface=IF]     # LAN bridge br0 for guests (step 3j)
      myosi bridge-status                       # bridge, slaves, address
 sudo myosi bridge-delete                       # remove it, restore the plain iface
@@ -3470,6 +3513,9 @@ sudo systemd-sysext list
   - `systemd-repart.service` completed successfully or exited with the whitelisted no-free-space code.
   - `StandardOutput=journal+console` on the service ensures errors reach the framebuffer — check `journalctl -b` from an emergency shell.
 
+### `myosi security-check` says the bootstrap key still unlocks
+- That is the expected state until the host is finalized. Add a passphrase and/or TPM2 slot, then kill slot 0 (step 3d). The bootstrap key ships in every **public** release artifact, so a host that still accepts it is not meaningfully encrypted. Finish with `sudo cryptsetup luksKillSlot /dev/disk/by-partlabel/data-luks 0`, verify with `sudo myosi security-check`, and reboot.
+
 ### `sysroot-etc.mount` unmounted by initrd-cleanup isolate
 - `initrd-cleanup.service` runs `systemctl --no-block isolate initrd-switch-root.target` seconds before the pivot. Without `IgnoreOnIsolate=yes`, the mount is stopped and the kernel pivots into an empty `/etc`. Both `sysroot-.etc.mount` and `sysroot-etc.mount` set it, and ordering is maintained by the explicit `After=` chain from `myosi-data-attach.service`.
 
@@ -3492,7 +3538,7 @@ sudo systemd-sysext list
 - Expected — the image ships none. Log in at the **console** as `root` / `changeme` and create yours with `homectl create`; see [Post-installation](#post-installation). SSH won't work for this: sshd is publickey-only, so the bootstrap password is console-only by design.
 
 ### `myosi extension-enable` doesn't add me to `libvirt` / `incus-admin`
-- Group binding runs from `myosi-users.service`, enabled the first time you run `myosi user-create`. A live `myosi extension-enable` also re-binds via the sysext refresh chain, but group changes only apply at next login — so log out and back in. Verify the drop-ins exist under `/usr/share/myosi/user-groups.d/` and check `journalctl -u myosi-users.service`.
+- Group binding is driven by declared records. If `/etc/myosi/users/*.user` is empty, `myosi-users.service` logs "no identities declared" and binds nobody, even though `/usr/share/myosi/user-groups.d/*.conf` exists. Create a record for your user (`sudo myosi user-create <you> ...`). A live `myosi extension-enable` also re-binds via the sysext refresh chain, but group changes only apply at next login — so log out and back in. Verify with `sudo myosi user-list` and `journalctl -u myosi-users.service`.
 
 ### `systemd-nspawn --image=` fails with "Failed to load Verity signature partition: No data available"
 - Host kernel `.platform` keyring doesn't trust our `image.crt`. Expected on test hosts. Use the loop-mount + `--directory` + `--volatile=overlay` path documented above.
@@ -3516,7 +3562,7 @@ sudo systemd-sysext list
 - A symlink from `distrobox-host-exec` to `systemctl` was misdirecting. Remove the symlink; mkosi calls real systemd via `distrobox-host-exec systemctl`.
 
 ### Image too large (~17 GB compressed)
-- Was caused by `mkosi.extra/usr/lib/repart.d/90-data.conf SizeMinBytes=16G`. Fixed in v0.1+: now `SizeMinBytes=256M` and no `SizeMaxBytes`, so the data partition grows to fill disk on first boot. Shipped image ≈ 700 MB.
+- Was caused by `mkosi.extra/usr/lib/repart.d/90-data.conf SizeMinBytes=16G`. Fixed in v0.1+: now `SizeMinBytes=256M` and no `SizeMaxBytes`, so the data partition grows to fill disk on first boot. The compressed image is well under the old 17 GB; exact size depends on the baked profile set (containers/virt are baked today).
 
 ---
 
@@ -3591,7 +3637,7 @@ The narrower case — nvim-treesitter shelling out to a literal `cc` to build pa
 
 | Milestone | Status |
 |-----------|--------|
-| **v1: scaffolding** | ✅ done — slim base + sysexts (desktop, containers, firmware, virt, nvidia*); signing infra; transfer defs; install scripts; CI workflow. Earlier drafts shipped per-host confexts as the default; the confext layer has since been retired (single `/etc` overlay), and all reusable signed configuration ships as sysexts under `/usr`. |
+| **v1: scaffolding** | ✅ done — slim base + sysexts (desktop, containers, virt, nvidia*); firmware lives in the base; signing infra; transfer defs; install scripts; CI workflow. Earlier drafts shipped per-host confexts as the default; the confext layer has since been retired (single `/etc` overlay), and all reusable signed configuration ships as sysexts under `/usr`. |
 | **v1.1: declarative passwd + base hardening** | ✅ done — sysusers + shipped shadow + subuid/subgid + sudo + sysctl + ssh + zram + modprobe + udev |
 | **v1.2: writable /etc in real initrd** | ✅ done — cpio sub-image `mkosi.images/initrd/` (Include=mkosi-initrd, bash+cryptsetup+btrfs-progs+util-linux+attr); `myosi-data-attach.service` finds root disk, selects its `Type=var` partition, unlocks as `/dev/mapper/data` (key-file probe → TPM2/passphrase fallback), unlocks `data-N` pool members across ANY disk, scans btrfs; `sysroot-.etc.mount` + `myosi-etc-prepare.service` + `sysroot-etc.mount` then mount the `/etc` subvolume at `/sysroot/.etc` and overlay its layers with the factory tree onto `/sysroot/etc`. `/var` is mounted post-pivot by the explicit `var.mount` unit, same lifecycle as home.mount and srv.mount (gpt-auto is not used — see "Why isn't `/var` mounted in the initrd?"). Uses `udevadm info` for partition metadata (blkid exits 2 on dm-verity partitions). No `/etc/fstab` or `/etc/crypttab` in the sealed root — all unlock/mount declarative. **The `/etc` overlay was retired once (upper at `/var/etc`) in favour of a plain seeded subvolume, then reinstated with its layers inside the `/etc` subvolume mounted at `/.etc` — see "The /etc overlay".**
 | **v1.3: signed kernel modules + module blacklist on UKI cmdline** | ✅ done — every `nvidia*.ko` / `zfs.ko` / `spl.ko` signed with `boot.key`; `module_blacklist=` baked into UKI cmdline as the single canonical blacklist source. |
@@ -4016,7 +4062,9 @@ tmux kill-session -t myosi-vm             # force kill if stuck
 
 ## Image shape: minimal + first-boot expansion (ParticleOS pattern, 2026.06.08+)
 
-The shipped `.raw.zst` is the **minimal layout** (~700 MB compressed):
+The shipped `.raw.zst` is the **minimal partition layout** (compressed
+size depends on the baked profile set; the current base also bakes
+containers/virt):
 4 partitions — ESP + root-A + verity-A + verity-sig-A. On first boot,
 `systemd-repart` in the initrd reads `/usr/lib/repart.d/` (the
 8-partition runtime layout baked in via `ExtraTrees=`) and creates

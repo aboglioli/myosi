@@ -43,6 +43,15 @@ update version="" refresh="":
 
     command -v "$SYSUPDATE" >/dev/null || { echo "ERROR: $SYSUPDATE is required" >&2; exit 4; }
 
+    LUKS_DEV=/dev/disk/by-partlabel/data-luks
+    if [ -e "$LUKS_DEV" ] && \
+       cryptsetup luksOpen --test-passphrase \
+           --key-file /usr/share/myosi/keys/data.key "$LUKS_DEV" \
+           >/dev/null 2>&1; then
+        echo "WARNING: $LUKS_DEV still unlocks with the public bootstrap key." >&2
+        echo "         Run 'myosi security-check' and finalize the host (README 3d)." >&2
+    fi
+
     # The url-file source exposes only the latest release
     # (releases/latest/download); an explicit VERSION works only when it
     # IS the latest. Older-version installs go through the sd-boot menu

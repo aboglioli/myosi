@@ -10,7 +10,8 @@ enable systemd-resolved.service
 
 # Sysext + UKI boot bookkeeping
 enable systemd-sysext.service
-enable systemd-bless-boot.service
+# systemd-bless-boot.service is static: systemd-bless-boot-generator pulls it
+# in when the booted UKI carries a boot-counting suffix.
 # Copies the image's signed sd-boot over every older sd-boot on the ESP,
 # including shim's second stage EFI/BOOT/grubx64.EFI. Never downgrades.
 enable systemd-boot-update.service

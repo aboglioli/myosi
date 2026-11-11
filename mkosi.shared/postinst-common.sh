@@ -3,8 +3,9 @@
 # DO NOT source from sysext postinsts: sysexts overlay main's /usr at
 # runtime, so version metadata / extensions written here would shadow
 # main's copy (sysexts use sysext-build.sh instead). Covers preset-all,
-# SELinux factory-/etc subs, /root|/mnt symlinks, /srv mountpoint,
-# version metadata. Needs $BUILDROOT + $SRCDIR (top-level dir, set by mkosi).
+# authselect regeneration, SELinux factory-/etc subs, /root|/mnt
+# symlinks, /srv mountpoint, version metadata. Needs $BUILDROOT + $SRCDIR
+# (top-level dir, set by mkosi).
 
 # Apply preset policy — without this the preset files ship but no
 # .wants/ symlinks exist until an operator runs preset-all at runtime.
@@ -36,6 +37,30 @@ for f in shadow gshadow shadow- gshadow-; do
         chmod 0000 "$BUILDROOT/etc/$f"
     fi
 done
+
+# The authselect RPM ships the default profile, so the factory system-auth
+# lacks pam_systemd_home unless it is regenerated from authselect.conf.
+AS_CONF="$BUILDROOT/etc/authselect/authselect.conf"
+if [ -f "$AS_CONF" ]; then
+    [ -x "$BUILDROOT/usr/bin/authselect" ] || {
+        echo "postinst-common: ERROR $AS_CONF exists but authselect is not installed" >&2
+        exit 1
+    }
+    mapfile -t AS_ARGS < <(sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                               -e '/^$/d' "$AS_CONF")
+    if [ "${#AS_ARGS[@]}" -gt 0 ]; then
+        chroot "$BUILDROOT" authselect select "${AS_ARGS[@]}" --force --nobackup
+        chroot "$BUILDROOT" authselect check
+    fi
+    if grep -q '^with-systemd-homed' "$AS_CONF"; then
+        for stack in system-auth password-auth; do
+            grep -q pam_systemd_home "$BUILDROOT/etc/authselect/$stack" || {
+                echo "postinst-common: ERROR /etc/authselect/$stack has no pam_systemd_home (README 3a.1)" >&2
+                exit 1
+            }
+        done
+    fi
+fi
 
 # Rootfs is read-only erofs at runtime: redirect /root → var/roothome
 # and /mnt → var/mnt (tmpfiles provisions the targets each boot).
