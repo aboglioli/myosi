@@ -270,3 +270,17 @@ refresh_sysext() {
     # until ldconfig ran. Always refresh.
     ldconfig 2>/dev/null || true
 }
+
+image_cert_trusted() {
+    local cn ring
+    cn=$(openssl x509 -in /usr/share/myosi/keys/image.crt -noout -subject \
+            -nameopt multiline 2>/dev/null | sed -n 's/^ *commonName *= *//p')
+    [ -n "$cn" ] || return 1
+    for ring in .platform .machine; do
+        # No -q: its early exit can SIGPIPE keyctl under pipefail.
+        if keyctl list "%:$ring" 2>/dev/null | grep -F -- "$cn" >/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}

@@ -68,10 +68,7 @@ extension-enable name version="":
     feature_enable "{{name}}" sysupdate.d
     refresh_sysext
 
-    # grep without -q: its early exit can SIGPIPE keyctl under
-    # pipefail.
-    if ! keyctl list %:.platform 2>/dev/null | grep -E 'myosi DEV Image' >/dev/null \
-       && ! keyctl list %:.machine  2>/dev/null | grep -E 'myosi DEV Image' >/dev/null; then
+    if ! image_cert_trusted; then
         echo >&2
         echo "NOTE: image.crt isn't loaded into .platform/.machine yet" >&2
         echo "      sysext merged with integrity-only validation." >&2
@@ -107,11 +104,29 @@ extension-list:
     sysupdate_env
 
     echo "== features (enabled state includes /etc drop-ins) =="
+    feature_fallback() {
+        local f name state
+        for f in "$SU_DIR"/*.feature; do
+            [ -e "$f" ] || continue
+            name=${f##*/}; name=${name%.feature}
+            state=disabled
+            if [ -f "/etc/sysupdate.d/${name}.feature.d/enable.conf" ] && \
+               grep -q '^Enabled=true' "/etc/sysupdate.d/${name}.feature.d/enable.conf" 2>/dev/null; then
+                state=enabled
+            fi
+            printf '  %-24s %s\n' "$name" "$state"
+        done
+    }
     if command -v "$SYSUPDATE" >/dev/null; then
-        "$SYSUPDATE" features --no-pager 2>/dev/null | sed 's/^/  /' || true
+        out=$("$SYSUPDATE" features --no-pager 2>/dev/null) || out=""
+        if [ -n "$out" ]; then
+            printf '%s\n' "$out" | sed 's/^/  /'
+        else
+            echo "  (sysupdate features unavailable as this user — showing feature files)"
+            feature_fallback
+        fi
     else
-        find "$SU_DIR" -maxdepth 1 -name '*.feature' -printf '  %f\n' 2>/dev/null \
-            | sed 's/\.feature$//' | sort
+        feature_fallback
     fi
     echo
     echo "== sysexts on disk =="
