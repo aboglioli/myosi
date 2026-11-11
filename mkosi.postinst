@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Main myosi image postinst. Shared baseline (preset-all, SELinux
-# factory-/etc subs, /root|/mnt symlinks, /srv mountpoint, version
-# metadata) lives in mkosi.shared/postinst-common.sh; this wrapper
-# adds the main-image-only steps: MOK signing certs and the LUKS
-# bootstrap data.key into /usr/share/myosi/keys/ + /efi/keys/.
+# Main myosi image postinst. Shared baseline (preset-all, authselect
+# regeneration, SELinux factory-/etc subs, /root|/mnt symlinks, /srv
+# mountpoint, version metadata) lives in mkosi.shared/postinst-common.sh;
+# this wrapper adds the main-image-only steps: MOK signing certs and the
+# LUKS bootstrap data.key into /usr/share/myosi/keys/.
 
 set -euo pipefail
 
@@ -42,12 +42,12 @@ done
 
 # Bootstrap LUKS key: raw 32-byte PRIVATE material (mode 0600, no
 # PEM/DER conversion). repart formats LUKS slot 0 with it at first boot
-# and crypttab reads it every boot until the operator wipes slot 0.
-# Written by scripts/generate-bootstrap-key.sh.
+# and myosi-data-attach reads it from the verity root / initrd on every
+# boot until the operator wipes slot 0. Written by
+# scripts/generate-bootstrap-key.sh. Never copy it to the unencrypted ESP.
 DATA_KEY_SRC="$SRCDIR/keys/data.key"
 if [ -f "$DATA_KEY_SRC" ]; then
     install -m 0600 "$DATA_KEY_SRC" "$BUILDROOT/usr/share/myosi/keys/data.key"
-    install -m 0600 "$DATA_KEY_SRC" "$BUILDROOT/efi/keys/data.key"
 else
     echo "postinst: WARNING $DATA_KEY_SRC missing — repart Encrypt=key-file will fail at first boot" >&2
 fi
