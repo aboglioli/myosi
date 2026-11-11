@@ -159,6 +159,35 @@ else
     bad "myosi bridge-status dispatches" "$(printf '%s' "$BRIDGE_OUT" | head -1)"
 fi
 
+echo "== security finalization =="
+# The bootstrap LUKS key must live only in the verity root / initrd. A copy
+# on the ESP is readable offline by anyone holding the disk, and no runtime
+# consumer reads it there.
+check "no bootstrap LUKS key on the ESP" "no" \
+    "$([ -e /efi/keys/data.key ] && echo yes || echo no)"
+
+# The image declares with-systemd-homed; the factory tree and the live /etc
+# must both carry pam_systemd_home in the stacks local (system-auth) and
+# remote (password-auth, used by sshd) logins go through.
+check "authselect.conf selects with-systemd-homed" "yes" \
+    "$(grep -q '^with-systemd-homed' /usr/share/factory/etc/authselect/authselect.conf && echo yes || echo no)"
+for stack in system-auth password-auth; do
+    check "factory authselect/$stack has pam_systemd_home" "yes" \
+        "$(grep -q pam_systemd_home /usr/share/factory/etc/authselect/$stack && echo yes || echo no)"
+    check "/etc/pam.d/$stack has pam_systemd_home" "yes" \
+        "$(grep -q pam_systemd_home /etc/pam.d/$stack && echo yes || echo no)"
+done
+check "authselect configuration valid" "0" \
+    "$(authselect check >/dev/null 2>&1; echo $?)"
+
+# The operator-facing check exists in every image, even when nothing is
+# wrong. Only assert dispatch here; its own logic needs a real data-luks and
+# reports warnings/errors on an unprovisioned first boot.
+if [ -x /usr/local/bin/myosi ]; then
+    check "myosi security-check dispatches" "yes" \
+        "$(/usr/local/bin/myosi --list 2>/dev/null | grep -q security-check && echo yes || echo no)"
+fi
+
 echo "== disk health =="
 check "btrfs-scrub.timer enabled" "enabled" "$(systemctl is-enabled btrfs-scrub.timer 2>/dev/null)"
 check "btrfs-scrub.timer active"  "active"  "$(systemctl is-active btrfs-scrub.timer 2>/dev/null)"
