@@ -2,7 +2,7 @@
 
 Personal atomic, immutable Linux distribution built from raw mkosi + systemd primitives. Signed dm-verity erofs root, A/B sysupdate slots, signed sysexts for optional userspace features (kernel modules included), and an `/etc` assembled at boot as an overlay — verity-baked factory defaults underneath, a btrfs subvolume on the encrypted data-luks pool holding only what this host changed. Fedora 44 base. No bootc, no ostree, no rpm-ostree.
 
-The base image is the same on every host. Hostname and local tweaks live in the overlay upper at `/.etc/etc` on `data-luks`; every path nobody touched shows through from the verity-baked `/usr/share/factory/etc` factory tree and therefore tracks the image across upgrades. Optional features are added per host by enabling signed sysexts on top of the base: **`desktop`, `devel`, `nvidia`, `nvidia-580xx` and `zfs`** today. **`containers` and `virt` are currently baked into the base** via `mkosi.conf` `Profiles=`; their sysext artifacts are kept for the planned sysext-only transition but are redundant on today's fleet. Every kernel module shipped in a sysext is signed with `boot.key` so it passes `module.sig_enforce=1` at load.
+The base image is the same on every host. Hostname and local tweaks live in the overlay upper at `/.etc/etc` on `data-luks`; every path nobody touched shows through from the verity-baked `/usr/share/factory/etc` factory tree and therefore tracks the image across upgrades. Optional features are added per host by enabling signed sysexts on top of the base: **`desktop`, `devel`, `nvidia` and `nvidia-580xx`** today (`zfs` is paused until OpenZFS supports the image kernel). **`containers` and `virt` are currently baked into the base** via `mkosi.conf` `Profiles=`; their sysext artifacts are kept for the planned sysext-only transition but are redundant on today's fleet. Every kernel module shipped in a sysext is signed with `boot.key` so it passes `module.sig_enforce=1` at load.
 
 **See the Design notes and Multi-disk storage runbook appendices below for full architecture, rationale, multi-disk patterns, and milestones.**
 
@@ -1661,8 +1661,9 @@ Enable the features this host needs:
 # sudo myosi extension-enable virt
 sudo myosi extension-enable desktop        # niri, terminals, waybar, pipewire, mesa
 sudo myosi extension-enable devel          # gcc, binutils, make, cmake, common -devel
-sudo myosi extension-enable zfs            # OpenZFS module + userspace
 ```
+
+`zfs` is not in releases while OpenZFS lacks support for the image kernel; do not enable it.
 
 NVIDIA hosts must pick exactly one branch:
 
@@ -3556,7 +3557,7 @@ sudo systemd-sysext list
 - OpenZFS upstream typically trails new kernels by 2-6 weeks. The build script uses an upstream-tarball flow (`mkosi.shared/zfs-build.sh`) and picks the version itself: the newest stable release whose META `Linux-Minimum`..`Linux-Maximum` covers the image kernel's major.minor. The build log prints it as `Building zfs sysext: zfs=<version> kver=<kernel>`. When it fails with `No stable OpenZFS release declares support for kernel`, upstream has not caught up yet. Recovery paths:
   - **Wait for OpenZFS** to publish a release covering the kernel, then re-run the build. No change needed.
   - **Pin `ZFS_VERSION`** (for example `ZFS_VERSION=2.4.4`) to skip the lookup and build a specific release, including one that works despite its META.
-  - **`ZFS_BUILD_OPTIONAL=1`**, which makes `dnf install`, tarball fetch, configure, and rpmbuild failures non-fatal (empty sysext stub, exit 0). NOT set in CI releases on purpose: base + sysext transfers share one sysupdate generation, so a release missing the zfs asset would be silently invisible to every host with the zfs feature enabled — a loud CI failure is the better trade. Use it for local builds while waiting on upstream.
+  - **`ZFS_BUILD_OPTIONAL=1`**, which makes `dnf install`, tarball fetch, configure, and rpmbuild failures non-fatal (empty sysext stub, exit 0). Not set in CI: base + sysext transfers share one sysupdate generation, so a release missing the zfs asset is invisible to every host with the zfs feature enabled. CI currently leaves `Dependencies=zfs` out of `mkosi.local.conf` instead; re-add it once OpenZFS supports the kernel.
 
 ### `just build` from distrobox errors `"You must run systemctl inside a container!"`
 - A symlink from `distrobox-host-exec` to `systemctl` was misdirecting. Remove the symlink; mkosi calls real systemd via `distrobox-host-exec systemctl`.

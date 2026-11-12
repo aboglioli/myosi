@@ -253,11 +253,9 @@ jobs:
         # share one @v generation in sysupdate.d and sysupdate never
         # offers a version that is incomplete for the enabled feature
         # set — a release missing any shipped feature's .raw would
-        # silently block updates on every host that enabled it. A zfs
-        # build failure (upstream lagging a kernel bump) therefore
-        # fails the release loudly; zfs-build.sh already picks the newest
-        # OpenZFS supporting the kernel, so wait for upstream or ship
-        # without a new tag.
+        # silently block updates on every host that enabled it. zfs is
+        # left out until OpenZFS supports the image kernel (7.3): re-add
+        # Dependencies=zfs once zfs-build.sh resolves a version.
         run: |
           cat > mkosi.local.conf <<EOF
           [Build]
@@ -272,7 +270,6 @@ jobs:
           Dependencies=virt
           Dependencies=devel
           Dependencies=nvidia-580xx
-          Dependencies=zfs
           EOF
 
       - name: Build everything
