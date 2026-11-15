@@ -213,6 +213,10 @@ check "var-mnt-backups.mount NOT active"   "inactive" "$(systemctl is-active var
 check "var-mnt-backups.mount NOT enabled"  "static"   "$(systemctl is-enabled var-mnt-backups.mount 2>/dev/null)"
 check "/mnt/backups exists, unmounted"     ""         "$(findmnt -no TARGET /var/mnt/backups 2>/dev/null)"
 
+echo "== console =="
+check "kmsconvt@ enabled" "enabled" "$(systemctl is-enabled kmsconvt@.service 2>/dev/null)"
+check "getty@ disabled"  "disabled" "$(systemctl is-enabled getty@.service 2>/dev/null)"
+
 echo "== boot loader =="
 check "systemd-boot-update enabled" "enabled" "$(systemctl is-enabled systemd-boot-update.service 2>/dev/null)"
 check "systemd-boot-update active"  "active"  "$(systemctl is-active systemd-boot-update.service 2>/dev/null)"

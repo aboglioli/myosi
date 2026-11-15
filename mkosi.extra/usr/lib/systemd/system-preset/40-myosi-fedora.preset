@@ -8,6 +8,11 @@ enable firewalld.service
 enable NetworkManager.service
 enable systemd-resolved.service
 
+# VT login: kmscon replaces fbcon + getty@ as Fedora 45 does; agetty still
+# does the login inside it, and kmsconvt@ falls back to getty@ on failure.
+enable kmsconvt@.service
+disable getty@.service
+
 # Sysext + UKI boot bookkeeping
 enable systemd-sysext.service
 # systemd-bless-boot.service is static: systemd-bless-boot-generator pulls it
