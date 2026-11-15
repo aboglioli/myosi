@@ -3532,6 +3532,9 @@ sudo systemd-sysext list
 ### Sysexts fail to merge with a verity signature error
 - The kernel has no trusted `image.der`. Enroll `/efi/keys/image.der` into firmware db, or MOK-enroll `/usr/share/myosi/keys/image.der` with `mokutil --import`. Reboot, then verify with `sudo keyctl list %:.platform` and `sudo keyctl list %:.machine`. Unsigned sysexts are possible by changing `mkosi.shared/sysext.conf` from `Verity=signed` to `Verity=yes`, but then you keep Merkle-tree integrity without the PKCS#7 authenticity check.
 
+### `niri-session` starts but nothing is drawn (kmscon console)
+- kmscon holds DRM master on every GPU for as long as its tty is shown, so a compositor started straight from a kmscon login gets `Device or resource busy` on `/dev/dri/card*` and runs with no outputs. Start it through kmscon's own wrapper, which releases DRM master first and restores the console when the compositor exits: `kmscon-launch-gui niri-session`. If a failed start left `niri.service` running, `niri-session` refuses with "A niri session is already running": `systemctl --user stop niri.service` first. With a second monitor attached kmscon draws one terminal sized for the larger display, so the smaller one is cropped; unplugging it restores the full console.
+
 ### Login as `root` rejects `changeme` (nspawn)
 - nspawn was launched with `--read-only` instead of `--volatile=overlay`. Without overlay, `/etc/shadow` is RO and systemd-sysusers can't write the hash. Re-launch with `--volatile=overlay`.
 
