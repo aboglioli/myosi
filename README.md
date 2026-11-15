@@ -1731,7 +1731,7 @@ The transfer definitions live in:
 /usr/lib/sysupdate.d/            # host root, verity, verity-sig, UKI + sysext features (one @v generation)
 ```
 
-Pinning: the `url-file` source sees only the LATEST release (`releases/latest/download/`), so `myosi update VERSION` works only when VERSION is the latest. To roll back, boot the previous slot from the sd-boot menu; to install a specific sysext version, use `myosi extension-enable NAME VERSION` (direct per-tag download).
+Pinning: the `url-file` source sees only the LATEST release (`releases/latest/download/`), so `myosi update VERSION` works only when VERSION is the latest. To try a pre-release (never Latest, so no other host is offered it), run `sudo myosi update --tag 2026.11.15.01`: it points a temporary copy of the sysupdate definitions, feature drop-ins included, at that tag's `releases/download/<tag>/` and deletes it afterwards, so nothing on the host changes. Create the release with `gh release create <tag> --prerelease` before pushing the tag, so the build keeps it out of Latest. To roll back, boot the previous slot from the sd-boot menu; to install a specific sysext version, use `myosi extension-enable NAME VERSION` (direct per-tag download).
 
 #### 3h. Manual sysext install without `extension-enable`
 
