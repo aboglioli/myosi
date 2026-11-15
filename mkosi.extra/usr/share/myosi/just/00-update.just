@@ -11,35 +11,38 @@
 # ------- update ----------------------------------------------------
 
 [group('update')]
-update version="" refresh="":
+update *args:
     #!/usr/bin/env bash
     set -euo pipefail
     . /usr/libexec/myosi/lib.sh
     require_root
     sysupdate_env
 
-    raw_version="{{version}}"
-    raw_refresh="{{refresh}}"
     REFRESH=false
-    case "$raw_version:$raw_refresh" in
-        --refresh:)
-            raw_version=""
-            REFRESH=true
-            ;;
-        --refresh:*)
-            raw_version="$raw_refresh"
-            REFRESH=true
-            ;;
-        *:--refresh)
-            REFRESH=true
-            ;;
-        *:)
-            ;;
-        *)
-            echo "ERROR: usage: myosi update [--refresh] [VERSION]" >&2
-            exit 2
-            ;;
-    esac
+    TAG=""
+    raw_version=""
+    set -- {{args}}
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --refresh)
+                REFRESH=true
+                ;;
+            --tag)
+                [ $# -ge 2 ] || { echo "ERROR: --tag needs a release tag" >&2; exit 2; }
+                TAG="$2"
+                shift
+                ;;
+            -*)
+                echo "ERROR: usage: myosi update [--refresh] [--tag TAG] [VERSION]" >&2
+                exit 2
+                ;;
+            *)
+                [ -z "$raw_version" ] || { echo "ERROR: usage: myosi update [--refresh] [--tag TAG] [VERSION]" >&2; exit 2; }
+                raw_version="$1"
+                ;;
+        esac
+        shift
+    done
 
     command -v "$SYSUPDATE" >/dev/null || { echo "ERROR: $SYSUPDATE is required" >&2; exit 4; }
 
@@ -57,6 +60,19 @@ update version="" refresh="":
     # IS the latest. Older-version installs go through the sd-boot menu
     # (previous slot) or `myosi extension-enable NAME VERSION`.
     cmd=("$SYSUPDATE" update)
+    if [ -n "$TAG" ]; then
+        [[ "$TAG" =~ ^[0-9]{4}(\.[0-9]{2}){2}(\.[0-9]{2})?$ ]] || {
+            echo "ERROR: --tag expects a release tag like 2026.11.15 or 2026.11.15.01" >&2
+            exit 2
+        }
+        DEFINITIONS=$(mktemp -d)
+        trap 'rm -r -- "$DEFINITIONS"' EXIT
+        cp -r "$SU_DIR"/. "$DEFINITIONS"/
+        [ ! -d /etc/sysupdate.d ] || cp -r /etc/sysupdate.d/. "$DEFINITIONS"/
+        sed -i "s#releases/latest/download#releases/download/$TAG#" "$DEFINITIONS"/*.transfer
+        cmd+=("--definitions=$DEFINITIONS")
+        echo "Installing release $TAG (a pre-release stays out of the Latest channel)."
+    fi
     [ -n "$raw_version" ] && [ "$raw_version" != latest ] && cmd+=("$raw_version")
     "${cmd[@]}"
 
