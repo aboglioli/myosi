@@ -198,7 +198,7 @@ sysext_write_extension_release() {
     mkdir -p "$(dirname "$f")"
     {
         printf 'ID=fedora\n'
-        printf 'VERSION_ID=44\n'
+        printf 'VERSION_ID=45\n'
         printf 'ARCHITECTURE=%s\n' "$arch"
         printf 'SYSEXT_LEVEL=1\n'
         printf 'SYSEXT_SCOPE=system\n'
