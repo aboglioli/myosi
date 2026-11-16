@@ -1,6 +1,6 @@
 # myosi
 
-Personal atomic, immutable Linux distribution built from raw mkosi + systemd primitives. Signed dm-verity erofs root, A/B sysupdate slots, signed sysexts for optional userspace features (kernel modules included), and an `/etc` assembled at boot as an overlay — verity-baked factory defaults underneath, a btrfs subvolume on the encrypted data-luks pool holding only what this host changed. Fedora 44 base. No bootc, no ostree, no rpm-ostree.
+Personal atomic, immutable Linux distribution built from raw mkosi + systemd primitives. Signed dm-verity erofs root, A/B sysupdate slots, signed sysexts for optional userspace features (kernel modules included), and an `/etc` assembled at boot as an overlay — verity-baked factory defaults underneath, a btrfs subvolume on the encrypted data-luks pool holding only what this host changed. Fedora 45 base. No bootc, no ostree, no rpm-ostree.
 
 The base image is the same on every host. Hostname and local tweaks live in the overlay upper at `/.etc/etc` on `data-luks`; every path nobody touched shows through from the verity-baked `/usr/share/factory/etc` factory tree and therefore tracks the image across upgrades. Optional features are added per host by enabling signed sysexts on top of the base: **`desktop`, `devel`, `nvidia` and `nvidia-580xx`** today (`zfs` is paused until OpenZFS supports the image kernel). **`containers` and `virt` are currently baked into the base** via `mkosi.conf` `Profiles=`; their sysext artifacts are kept for the planned sysext-only transition but are redundant on today's fleet. Every kernel module shipped in a sysext is signed with `boot.key` so it passes `module.sig_enforce=1` at load.
 
@@ -3205,7 +3205,7 @@ Why per-user rather than a system-wide `rootless_storage_path`, which is the obv
 - **A user-scope config is not.** Each scope reads an explicit value and nothing is inferred, so the same pair works across podman generations. `$UID` does expand in a user-scope file, so one file serves every host and user.
 - **Nothing is lost by living in the home.** Rootless podman cannot run without `$HOME` anyway — it fails with `cannot resolve <home>` — so a locked homed home already rules it out, config file or not.
 
-The cost is real and worth stating: on podman 5.8.4 a user without that file silently stores images in `$HOME/.local/share/containers/storage`, which is exactly what this avoids. On podman 6 it is worse than silent — measured on 6.1.0, a rootless user with no user-scope file inherits the *system* `graphroot` and `runroot`, i.e. `/var/lib/containers/storage` and `/run/containers/storage`, both `0700 root`, and podman fails outright. Since Fedora's vendor `storage.conf` does set `graphroot`, the myenv file stops being an optimisation and becomes what keeps rootless podman working. Worth re-checking when the F45/podman 6 rebase lands, since it implies stock Fedora must drop `graphroot` from that file.
+The cost is real and worth stating: on podman 5.8.4 a user without that file silently stores images in `$HOME/.local/share/containers/storage`, which is exactly what this avoids. On podman 6 it is worse than silent — measured on 6.1.0, a rootless user with no user-scope file inherits the *system* `graphroot` and `runroot`, i.e. `/var/lib/containers/storage` and `/run/containers/storage`, both `0700 root`, and podman fails outright. Fedora 44's vendor `storage.conf` sets `graphroot`, so there the myenv file keeps rootless podman working. Fedora 45 drops `graphroot` from the vendor file (checked in a `fedora:45` container: `driver` lives in `storage.conf.d/00-vendor.conf`, and `storage.rootless.conf.d/` only sets `mountopt = "nodev"`), so the failure no longer occurs there and the myenv file only keeps layers out of the homed `$HOME`.
 
 Two podman behaviours that shaped this, both measured:
 
@@ -3531,6 +3531,9 @@ sudo systemd-sysext list
 
 ### Sysexts fail to merge with a verity signature error
 - The kernel has no trusted `image.der`. Enroll `/efi/keys/image.der` into firmware db, or MOK-enroll `/usr/share/myosi/keys/image.der` with `mokutil --import`. Reboot, then verify with `sudo keyctl list %:.platform` and `sudo keyctl list %:.machine`. Unsigned sysexts are possible by changing `mkosi.shared/sysext.conf` from `Verity=signed` to `Verity=yes`, but then you keep Merkle-tree integrity without the PKCS#7 authenticity check.
+
+### `niri-session` starts but nothing is drawn (kmscon console)
+- kmscon holds DRM master on every GPU for as long as its tty is shown, so a compositor started straight from a kmscon login gets `Device or resource busy` on `/dev/dri/card*` and runs with no outputs. Start it through kmscon's own wrapper, which releases DRM master first and restores the console when the compositor exits: `kmscon-launch-gui niri-session`. If a failed start left `niri.service` running, `niri-session` refuses with "A niri session is already running": `systemctl --user stop niri.service` first. With a second monitor attached kmscon draws one terminal sized for the larger display, so the smaller one is cropped; unplugging it restores the full console.
 
 ### Login as `root` rejects `changeme` (nspawn)
 - nspawn was launched with `--read-only` instead of `--volatile=overlay`. Without overlay, `/etc/shadow` is RO and systemd-sysusers can't write the hash. Re-launch with `--volatile=overlay`.

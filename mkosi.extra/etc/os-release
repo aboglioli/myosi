@@ -1,8 +1,8 @@
 NAME="myosi"
-PRETTY_NAME="myosi (Fedora 44 base)"
+PRETTY_NAME="myosi (Fedora 45 base)"
 ID=myosi
 ID_LIKE=fedora
-VERSION_ID=44
+VERSION_ID=45
 VARIANT_ID=myosi
 # Fallback when no firstboot.hostname credential resolves; systemd uses this
 # instead of "localhost". /etc/hostname is deliberately not shipped.

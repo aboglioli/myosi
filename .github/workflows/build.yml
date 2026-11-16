@@ -165,7 +165,7 @@ jobs:
         # All host-side CLI tools used by the build job, in one place.
         # The runner is ubuntu-24.04. mkosi itself comes from the
         # systemd/mkosi action above. mkosi's ToolsTree handles the
-        # in-build Fedora 44 toolchain; this step covers commands
+        # in-build Fedora 45 toolchain; this step covers commands
         # invoked on the HOST during the workflow:
         #
         #   ukify  (systemd-ukify)  — used by mkosi.finalize to
@@ -261,7 +261,7 @@ jobs:
           [Build]
           ToolsTree=default
           ToolsTreeDistribution=fedora
-          ToolsTreeRelease=44
+          ToolsTreeRelease=45
           WorkspaceDirectory=$TMPDIR
           PackageCacheDirectory=$TMPDIR/cache
 
