@@ -80,3 +80,27 @@ for ext in .raw.zst .raw .raw.xz; do
     rename_one root   "$ROOT_UUID"   "$ext"
     rename_one verity "$VERITY_UUID" "$ext"
 done
+
+# repart --split= trims the NUL padding off the verity-sig artifact. systemd
+# 262 then zero-fills the rest of the partition after writing it, and that
+# fill fails with EBUSY when the payload ends mid-page. Padding to the full
+# partition size leaves nothing to fill and keeps the tail clean.
+VERITY_SIG_PARTITION_BYTES=16384
+
+pad_verity_sig() {
+    local sig="$OUT/myosi_${VER}_${ARCH}.verity-sig.raw" size
+    if [ ! -f "$sig.zst" ] || [ -L "$sig.zst" ]; then return 0; fi
+
+    zstd -dqf "$sig.zst" -o "$sig"
+    size=$(stat -c %s "$sig")
+    if [ "$size" -gt "$VERITY_SIG_PARTITION_BYTES" ]; then
+        echo "stage-artifacts: ERROR: $(basename "$sig") is $size bytes, larger than the $VERITY_SIG_PARTITION_BYTES byte partition" >&2
+        exit 1
+    fi
+
+    truncate -s "$VERITY_SIG_PARTITION_BYTES" "$sig"
+    zstd -qf --rm "$sig" -o "$sig.zst"
+    echo "stage-artifacts: padded $(basename "$sig.zst") $size → $VERITY_SIG_PARTITION_BYTES bytes"
+}
+
+pad_verity_sig
